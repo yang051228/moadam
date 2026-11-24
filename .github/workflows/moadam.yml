@@ -1,0 +1,56 @@
+name: Publish Moadam
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: moadam-production
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page_url }}
+    env:
+      PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare verified source in runner
+        run: |
+          echo 'cd55d741bc3aaf81e7b1a0ca3a0085b30ef983f2c2f67d719541968f2fb41e1e  moadam-release.patch' | sha256sum --check
+          git apply --binary moadam-release.patch
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Build and test
+        run: |
+          test -n "$PROJECT_REF"
+          npm ci
+          npm test
+          cp -r public pages-site/public
+          NEXT_PUBLIC_MOADAM_API="https://$PROJECT_REF.supabase.co/functions/v1/moadam" npm exec -- next build pages-site --webpack
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Deploy database and API
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          supabase link --project-ref "$PROJECT_REF"
+          supabase db push
+          supabase functions deploy moadam --project-ref "$PROJECT_REF"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages-site/out
+      - uses: actions/deploy-pages@v4
+        id: publish

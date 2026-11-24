@@ -1,0 +1,3976 @@
+diff --git a/.gitignore b/.gitignore
+index dafa98013ff50f9bab886c497183749522b7b1db..9a2f54ad3411cf7baeed3a64db6eca4614b277c7 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -6,3 +6,8 @@ data/
+ *.tsbuildinfo
+ test-results/
+ playwright-report/
++
++pages-site/public/
++pages-site/out/
++pages-site/next-env.d.ts
++supabase/.temp/
+diff --git a/README.md b/README.md
+index 724504fbf379fae920b4577807a66ab84be47299..fe8e2b9ab4932792bfa974a6c9b82e2d05762bba 100644
+--- a/README.md
++++ b/README.md
+@@ -2,6 +2,22 @@
+ 
+ 한 사람이 한 단위만 필요한 생필품을 같은 기숙사의 학생들과 나누는 한국어 웹앱입니다. 학생은 내 분담금과 수령 장소를 확인하고 참여합니다. 개설자는 모집 결과를 확인한 뒤 판매처에서 주문하고, 소분과 전달을 기록합니다.
+ 
++## 친구에게 공유하는 GitHub Pages 버전
++
++모아담 화면은 GitHub Pages에서 열리고, Supabase Edge Function이 같은 기숙사 학생의 공구 신청을 PostgreSQL에 기록합니다. 아래 설정은 저장소 소유자 계정에서 한 번만 진행합니다.
++
++1. 수정된 프로젝트를 `yang051228/moadam`의 `main` 브랜치에 반영합니다. 저장소의 첫 화면에서 `app`, `components`, `pages-site`, `supabase`, `.github/workflows/moadam.yml`을 확인합니다.
++2. GitHub 저장소 **Settings → Pages → Build and deployment → Source**에서 **GitHub Actions**를 선택합니다.
++3. **Settings → Secrets and variables → Actions → Variables → New repository variable**에서 `SUPABASE_PROJECT_REF`를 등록합니다. 값은 본인 Supabase 프로젝트 대시보드 주소의 `/project/` 바로 다음에 있는 식별자입니다.
++4. 같은 화면 **Secrets → New repository secret**에서 `SUPABASE_ACCESS_TOKEN`과 `SUPABASE_DB_PASSWORD`를 각각 등록합니다. 첫 번째 값은 [Supabase 계정 토큰](https://supabase.com/dashboard/account/tokens)에서 발급하고, 두 번째 값은 해당 프로젝트를 만들 때 설정한 데이터베이스 비밀번호입니다. 이 두 값은 GitHub Secrets에 직접 입력하세요.
++5. **Actions → Publish Moadam → Run workflow → main → Run workflow**를 선택합니다. 성공한 실행의 배포 링크를 엽니다. 저장소가 `yang051228/moadam`이면 공유 주소는 `https://yang051228.github.io/moadam/`입니다.
++
++배포 작업은 Pages 화면을 빌드하고 Supabase 마이그레이션과 함수를 적용한 뒤 Pages를 게시합니다. Supabase의 GitHub 연동에서 같은 마이그레이션을 자동 배포하도록 설정했다면 한쪽에서만 DB 배포를 관리하세요. 기존 SQLite 로컬 DB와 공개 배포용 PostgreSQL은 별도 데이터입니다. 기존 가입 정보나 개인 테스트 내역은 자동 이전하지 않습니다.
++
++**두 사람으로 확인하기.** 각각 회원가입에서 같은 기숙사를 선택하세요. 한 계정이 공구를 열어 상세 화면 링크를 보내고 다른 계정이 참여한 뒤, 개설자가 새로고침해서 참여자와 수량을 확인하세요. 데모 체험은 브라우저별 연습 공간을 사용합니다.
++
++**검증.** `npm test`는 기존 SQLite 시나리오를 실행합니다. `tests/pages-postgres.mjs`는 테스트용 PostgreSQL과 배포용 Edge Function을 실행한 환경에서 `node tests/pages-postgres.mjs`로 실행합니다. 데모 참여와 취소, 운영자 조회, 신규 계정 간 공유, 기숙사 접근 제한, 마지막 자리 동시 신청, 수령과 재로그인을 확인합니다. 테스트 데이터를 쓰므로 별도 테스트 DB를 사용하세요.
++
+ ## 실행
+ 
+ Node.js 24 LTS와 npm이 필요합니다. 압축을 풀고 package.json이 있는 폴더에서 실행합니다.
+diff --git a/app/api/[...path]/route.ts b/app/api/[...path]/route.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3454e0cfb730984a290e6a7f1f4205e63f335dbe
+--- /dev/null
++++ b/app/api/[...path]/route.ts
+@@ -0,0 +1,79 @@
++import { NextRequest, NextResponse } from "next/server";
++import { login, logout, user, accountLogin } from "../../../lib/db";
++import { browse, detail, admin, act } from "../../../lib/service";
++export const runtime = "nodejs";
++export const dynamic = "force-dynamic";
++const fail = (m: string, s: number) =>
++  NextResponse.json({ error: m }, { status: s });
++async function handler(req: NextRequest) {
++  const path = req.nextUrl.pathname.slice(5),
++    session = req.cookies.get("dm_session")?.value || "",
++    me = user(session);
++  try {
++    if (req.method === "GET") {
++      if (!me)
++        return path === "home"
++          ? NextResponse.json({ me: null })
++          : fail("로그인이 필요해요.", 401);
++      if (path === "home") return NextResponse.json(browse(me));
++      if (path === "admin") return NextResponse.json(admin(me));
++      if (/^buy\/\d+$/.test(path))
++        return NextResponse.json(detail(me, Number(path.split("/")[1])));
++      return fail("페이지를 찾을 수 없어요.", 404);
++    }
++    if (
++      req.headers.get("origin") &&
++      new URL(req.headers.get("origin")!).host !== req.headers.get("host")
++    )
++      return fail("요청 출처를 확인해 주세요.", 403);
++    const raw = await req.text();
++    if (raw.length > 800000) return fail("첨부파일을 줄여 주세요.", 413);
++    const a = JSON.parse(raw || "{}"),
++      opts = {
++        httpOnly: true,
++        sameSite: "lax" as const,
++        secure: req.nextUrl.protocol === "https:",
++        path: "/",
++      };
++    if (path === "signup" || path === "signin") {
++      const key = accountLogin(a, path === "signup");
++      if (session) logout(session);
++      const r = NextResponse.json({ ok: true });
++      r.cookies.set("dm_session", key, { ...opts, maxAge: 7 * 86400 });
++      return r;
++    }
++    if (path === "login") {
++      const keys = login(
++        req.cookies.get("dm_space")?.value || "",
++        a.account,
++        a.dorm,
++        a.notify !== false,
++      );
++      if (session) logout(session);
++      const r = NextResponse.json({ ok: true });
++      r.cookies.set("dm_space", keys.spaceKey, { ...opts, maxAge: 30 * 86400 });
++      r.cookies.set("dm_session", keys.session, { ...opts, maxAge: 7 * 86400 });
++      return r;
++    }
++    if (!me) return fail("로그인이 필요해요.", 401);
++    if (path === "logout") {
++      logout(session);
++      const r = NextResponse.json({ ok: true });
++      r.cookies.delete("dm_session");
++      return r;
++    }
++    if (path === "act") return NextResponse.json(act(me, a));
++    return fail("요청을 찾을 수 없어요.", 404);
++  } catch (e) {
++    return fail(
++      e instanceof Error &&
++        e.name !== "ZodError" &&
++        !e.message.includes("SQLITE")
++        ? e.message
++        : "입력값을 다시 확인해 주세요.",
++      400,
++    );
++  }
++}
++export const GET = handler,
++  POST = handler;
+diff --git a/globals.css b/app/globals.css
+similarity index 100%
+rename from globals.css
+rename to app/globals.css
+diff --git a/layout.tsx b/app/layout.tsx
+similarity index 100%
+rename from layout.tsx
+rename to app/layout.tsx
+diff --git a/page.tsx b/app/page.tsx
+similarity index 100%
+rename from page.tsx
+rename to app/page.tsx
+diff --git a/components/App.tsx b/components/App.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..871e09847e49b0ca80ca74917a7a020f728382f6
+--- /dev/null
++++ b/components/App.tsx
+@@ -0,0 +1,732 @@
++"use client";
++import { productImage } from "./common";
++import { useEffect, useState } from "react";
++import {
++  House,
++  Compass,
++  SquarePlus,
++  ShoppingBag,
++  UserRound,
++  Building2,
++  ChevronDown,
++  Bell,
++  Search,
++  Settings2,
++  LayoutDashboard,
++  ArrowUpRight,
++  ChevronRight,
++  Package,
++  ShieldCheck,
++  Flame,
++  GraduationCap,
++  Bookmark,
++  ShoppingBasket,
++  SlidersHorizontal,
++} from "lucide-react";
++import { catalog, day, stages } from "../lib/catalog";
++import { api, Card, Modal, won, date } from "./common";
++import { BuyDetail, BuyForm, Dashboard } from "./Flows";
++const nav = [
++  ["home", "홈", House],
++  ["explore", "공구 탐색", Compass],
++  ["create", "공구 열기", SquarePlus],
++  ["mine", "내 공구", ShoppingBag],
++  ["profile", "마이페이지", UserRound],
++] as const;
++const preview = catalog.map(
++  ([name, art, category, price, qty, lots, n], i) => ({
++    id: i + 1,
++    name,
++    image: "/art/" + art + ".webp",
++    category,
++    price,
++    qty,
++    lots,
++    people: n,
++    used: n,
++    place: "A기숙사 1층 로비",
++    official: i < 3,
++    status: "open",
++    deadline: 0,
++    owner: -1,
++    mine: false,
++  }),
++);
++export default function App() {
++  const [page, setPage] = useState("home"),
++    [data, setData] = useState<any>({ me: null }),
++    [err, setError] = useState(""),
++    [loading, setLoading] = useState(false),
++    [login, setLoginOpen] = useState(false),
++    [account, setAccount] = useState("member"),
++    [dorm, setDorm] = useState("A"),
++    [notify, setNotify] = useState(true),
++    [notice, setNotificationsOpen] = useState(false),
++    [q, setSearch] = useState(""),
++    [type, setType] = useState("전체"),
++    [status, setStatus] = useState("전체"),
++    [category, setCategory] = useState("전체"),
++    [saved, setSaved] = useState<number[]>([]),
++    [sort, setDeadlineSort] = useState(false),
++    [onlySaved, setOnlySaved] = useState(false),
++    [msg, setMessage] = useState(""),
++    [rev, setRevision] = useState(0),
++    [now, setNow] = useState(0),
++    [next, setNextPage] = useState(""),
++    [authMode, setAuthMode] = useState("demo"),
++    [handle, setHandle] = useState(""),
++    [password, setPassword] = useState(""),
++    [authErr, setAuthError] = useState("");
++  const me = data.me,
++    groups: any[] = me
++      ? data.groups || []
++      : preview.map((g, i) => ({ ...g, deadline: now + (i + 1) * day })),
++    active = page.split("/")[0],
++    title =
++      nav.find((n) => n[0] === active)?.[1] ||
++      (active === "buy" ? "공구 상세" : "운영 대시보드");
++  async function refresh() {
++    try {
++      setData(await api("home"));
++      setError("");
++    } catch (e) {
++      setError((e as Error).message);
++    }
++  }
++  useEffect(() => {
++    setNow(Date.now());
++    const change = () => {
++      setPage(location.hash.slice(1) || "home");
++      window.scrollTo(0, 0);
++    };
++    change();
++    window.addEventListener("hashchange", change);
++    refresh();
++    const iv = setInterval(refresh, 18000);
++    return () => {
++      clearInterval(iv);
++      window.removeEventListener("hashchange", change);
++    };
++  }, []);
++  useEffect(() => {
++    try {
++      setSaved(
++        JSON.parse(
++          localStorage.getItem("saved-" + (me?.id || "preview")) || "[]",
++        ),
++      );
++    } catch {
++      setSaved([]);
++    }
++  }, [me?.id]);
++  useEffect(() => {
++    if (msg) {
++      const t = setTimeout(() => setMessage(""), 2800);
++      return () => clearTimeout(t);
++    }
++  }, [msg]);
++  function go(p: string) {
++    location.hash = p;
++    setPage(p);
++  }
++  function needs(p: string) {
++    if (!me) {
++      setNextPage(p);
++      setLoginOpen(true);
++    } else go(p);
++  }
++  function toggle(id: number) {
++    const n = saved.includes(id)
++      ? saved.filter((x) => x !== id)
++      : [...saved, id];
++    setSaved(n);
++    localStorage.setItem("saved-" + (me?.id || "preview"), JSON.stringify(n));
++  }
++  function show(g: any) {
++    needs((me ? "buy/" : "sample/") + g.id);
++  }
++  function filter(t = "전체", st = "전체", s = false) {
++    setType(t);
++    setStatus(st);
++    setCategory("전체");
++    setSearch("");
++    setOnlySaved(false);
++    setDeadlineSort(s);
++    go("explore");
++  }
++  async function sign() {
++    setLoading(true);
++    setAuthError("");
++    try {
++      await api(authMode === "demo" ? "login" : authMode, {
++        account,
++        dorm,
++        notify,
++        handle,
++        password,
++      });
++      setPassword("");
++      const d = await api("home");
++      setData(d);
++      setLoginOpen(false);
++      if (next.startsWith("sample/") && !me) {
++        const target = d.groups.find(
++          (g: any) =>
++            g.name === preview[Number(next.split("/")[1]) - 1]?.name &&
++            g.status === "open",
++        );
++        go(target ? "buy/" + target.id : "home");
++      } else go(next || "home");
++      setNextPage("");
++      setMessage("로그인했어요.");
++    } catch (e) {
++      setAuthError((e as Error).message);
++    } finally {
++      setLoading(false);
++    }
++  }
++  const cards = (rows: any[]) =>
++    rows.length ? (
++      <div className="grid">
++        {rows.map((g) => (
++          <Card
++            key={g.id}
++            g={g}
++            open={() => show(g)}
++            saved={saved.includes(g.id)}
++            toggle={() => toggle(g.id)}
++          />
++        ))}
++      </div>
++    ) : (
++      <div className="empty">
++        <ShoppingBasket />
++        <h3>표시할 공구가 없어요</h3>
++        <p>다른 조건으로 탐색하거나 새 공구를 열어 보세요.</p>
++      </div>
++    );
++  const section = (Icon: any, label: string, desc: string, all: () => void) => (
++    <div className="section">
++      <div className="sectiontitle">
++        <Icon />
++        <div>
++          <h2>{label}</h2>
++          <p>{desc}</p>
++        </div>
++      </div>
++      <button className="link" onClick={all}>
++        전체 보기 <ChevronRight size={15} />
++      </button>
++    </div>
++  );
++  const visible = groups
++    .filter(
++      (g) =>
++        (type === "전체" || !!g.official === (type === "운영자")) &&
++        (status === "전체" ||
++          (status === "모집 중") === (g.status === "open")) &&
++        (category === "전체" || g.category === category) &&
++        g.name.includes(q.trim()) &&
++        (!onlySaved || saved.includes(g.id)),
++    )
++    .sort((a, b) => (sort ? a.deadline - b.deadline : 0));
++  const changed = () => {
++    refresh();
++    setRevision((v) => v + 1);
++  };
++  return (
++    <div className="shell">
++      <aside className="side">
++        <button className="brand" onClick={() => go("home")}>
++          <span className="brandicon">
++            <ShoppingBasket size={27} />
++          </span>
++          모아담
++        </button>
++        <span className="navlabel">공동구매</span>
++        <nav>
++          {nav.map(([id, label, Icon]) => (
++            <button
++              key={id}
++              className={active === id ? "on" : ""}
++              onClick={() => (id === "create" ? needs(id) : go(id))}
++            >
++              <Icon size={20} />
++              {label}
++            </button>
++          ))}
++          {me?.role === "admin" && (
++            <button onClick={() => go("admin")}>
++              <LayoutDashboard size={20} />
++              운영 대시보드
++            </button>
++          )}
++        </nav>
++        <div className="sidebottom">
++          <span className="avatar">
++            <UserRound />
++          </span>
++          <div>
++            <b>{me ? me.name : "데모 둘러보기"}</b>
++            <small>{me ? me.dorm + "기숙사" : "기숙사 공동구매"}</small>
++          </div>
++          <button
++            className="icon"
++            aria-label="계정 설정"
++            onClick={() => go("profile")}
++          >
++            <Settings2 size={17} />
++          </button>
++        </div>
++      </aside>
++      <div className="main">
++        <header>
++          <div className="topbrand">
++            <ShoppingBasket /> 모아담
++          </div>
++          <button
++            className="dorm"
++            onClick={() => {
++              setNextPage("home");
++              setLoginOpen(true);
++            }}
++          >
++            <Building2 size={18} />
++            {me?.dorm || "A"}기숙사
++            <ChevronDown size={15} />
++          </button>
++          <div className="tools">
++            <form
++              className="search"
++              onSubmit={(e) => {
++                e.preventDefault();
++                go("explore");
++              }}
++            >
++              <Search size={17} />
++              <input
++                aria-label="공구 검색"
++                placeholder="어떤 공구를 찾고 있나요?"
++                value={q}
++                onChange={(e) => {
++                  setSearch(e.target.value);
++                  if (e.target.value) go("explore");
++                }}
++              />
++            </form>
++            <button
++              className="icon notify"
++              aria-label="알림"
++              onClick={() => {
++                setNotificationsOpen(true);
++                if (me) api("act", { action: "seen" }).then(refresh);
++              }}
++            >
++              <Bell size={20} />
++              {data.notifications?.some((n: any) => !n.seen) && <i />}
++            </button>
++          </div>
++        </header>
++        <main>
++          {err && (
++            <div role="alert" className="box">
++              {err} <button onClick={refresh}>다시 시도</button>
++            </div>
++          )}
++          {active === "home" && (
++            <>
++              <div className="hero">
++                <div className="herocopy">
++                  <div className="eyebrow">
++                    <span />{" "}
++                    {me
++                      ? me.name.replace(" (데모)", "") + "님, 반가워요"
++                      : "기숙사 공동구매"}
++                  </div>
++                  <h1>
++                    함께 사서,
++                    <br />
++                    가볍게 나눠요<span>.</span>
++                  </h1>
++                  <p>우리 기숙사 생필품, 필요한 만큼만 담아가세요.</p>
++                  <button
++                    className="herobtn"
++                    onClick={() => filter("전체", "모집 중")}
++                  >
++                    모집 중인 공구 보기 <ChevronRight size={16} />
++                  </button>
++                </div>
++                <img src={productImage("/art/hero.webp")} alt="생활용품을 가득 담은 장바구니" />
++              </div>
++              {section(
++                ShieldCheck,
++                "운영자가 여는 공구",
++                "기숙사에서 자주 쓰는 생필품을 모았어요.",
++                () => filter("운영자"),
++              )}
++              {cards(
++                groups
++                  .filter((g) => g.official && g.status === "open")
++                  .slice(0, 3),
++              )}
++              {section(
++                GraduationCap,
++                "학생이 여는 공구",
++                "같은 기숙사 친구들과 함께 나눠요.",
++                () => filter("학생"),
++              )}
++              {cards(
++                groups
++                  .filter((g) => !g.official && g.status === "open")
++                  .slice(0, 3),
++              )}
++              {section(
++                Flame,
++                "마감이 가까운 공구",
++                "마감 전에 남은 수량을 확인해 보세요.",
++                () => filter("전체", "모집 중", true),
++              )}
++              <div className="box">
++                {groups
++                  .filter((g) => g.status === "open")
++                  .slice(0, 3)
++                  .map((g) => (
++                    <button className="row" key={g.id} onClick={() => show(g)}>
++                      <b>{g.name}</b>
++                      <span>{date(g.deadline)} 마감</span>
++                    </button>
++                  ))}
++              </div>
++              {section(
++                Package,
++                "내 공구 현황",
++                me
++                  ? "참여한 공구의 다음 단계를 확인하세요."
++                  : "로그인하면 참여한 공구를 확인할 수 있어요.",
++                () => needs("mine"),
++              )}
++              {me && cards(groups.filter((g) => g.mine).slice(0, 3))}
++              <button className="primary" onClick={() => needs("create")}>
++                새 공구 열기
++              </button>
++            </>
++          )}
++          {active === "explore" && (
++            <>
++              <h1>공구 탐색</h1>
++              <p>우리 기숙사에서 함께할 공구를 찾아보세요.</p>
++              <div className="filters">
++                <label className="search">
++                  <Search size={17} />
++                  <input
++                    aria-label="상품명 검색"
++                    value={q}
++                    onChange={(e) => setSearch(e.target.value)}
++                    placeholder="상품명 검색"
++                  />
++                </label>
++                <select
++                  aria-label="개설 유형"
++                  value={type}
++                  onChange={(e) => setType(e.target.value)}
++                >
++                  {["전체", "운영자", "학생"].map((v) => (
++                    <option key={v} value={v}>
++                      {v === "전체" ? "모든 개설자" : v + " 공구"}
++                    </option>
++                  ))}
++                </select>
++                <select
++                  aria-label="모집 상태"
++                  value={status}
++                  onChange={(e) => setStatus(e.target.value)}
++                >
++                  {["전체", "모집 중", "모집 마감"].map((v) => (
++                    <option key={v}>{v}</option>
++                  ))}
++                </select>
++                <select
++                  aria-label="카테고리"
++                  value={category}
++                  onChange={(e) => setCategory(e.target.value)}
++                >
++                  {[
++                    "전체",
++                    "생활용품",
++                    "세탁·청소",
++                    "식품",
++                    "문구",
++                    "기타",
++                  ].map((v) => (
++                    <option key={v}>{v}</option>
++                  ))}
++                </select>
++                <button
++                  aria-pressed={onlySaved}
++                  className={onlySaved ? "chip selected" : "chip"}
++                  onClick={() => setOnlySaved(!onlySaved)}
++                >
++                  <Bookmark size={15} />찜
++                </button>
++                <button
++                  className={sort ? "chip selected" : "chip"}
++                  onClick={() => setDeadlineSort(!sort)}
++                >
++                  <SlidersHorizontal size={15} />
++                  마감순
++                </button>
++              </div>
++              <h3>공구 {visible.length}개</h3>
++              {cards(visible)}
++            </>
++          )}
++          {active === "mine" && (
++            <>
++              <h1>내 공구</h1>
++              {me ? (
++                <>
++                  <h2>참여한 공구</h2>
++                  {cards(groups.filter((g) => g.mine))}
++                  <h2>내가 연 공구</h2>
++                  {cards(groups.filter((g) => g.owner === me.id))}
++                </>
++              ) : (
++                <div className="box">
++                  <p>
++                    참여와 수령 내역을 확인하려면 데모 계정으로 입장해 주세요.
++                  </p>
++                  <button className="primary" onClick={() => needs("mine")}>
++                    데모 로그인
++                  </button>
++                </div>
++              )}
++            </>
++          )}
++          {active === "profile" && (
++            <>
++              <h1>마이페이지</h1>
++              <div className="box">
++                <UserRound />
++                <h2>{me?.name || "데모 계정으로 시작하기"}</h2>
++                <p>
++                  {me
++                    ? me.dorm + "기숙사 · 개발용 기숙사 인증"
++                    : "계정과 기숙사를 선택해 공동구매를 체험하세요."}
++                </p>
++                <p>
++                  개발용 기숙사 인증을 사용해요. 실제 결제는 발생하지 않아요.
++                </p>
++                <button
++                  className="primary"
++                  onClick={() => {
++                    setNextPage("home");
++                    setLoginOpen(true);
++                  }}
++                >
++                  {me ? "계정 전환" : "로그인 또는 회원가입"}
++                </button>
++                {me && (
++                  <button
++                    className="secondary"
++                    onClick={async () => {
++                      await api("logout", {});
++                      await refresh();
++                      go("home");
++                    }}
++                  >
++                    로그아웃
++                  </button>
++                )}
++                {me?.role === "admin" && (
++                  <button className="secondary" onClick={() => go("admin")}>
++                    운영 대시보드
++                  </button>
++                )}
++              </div>
++            </>
++          )}
++          {active === "create" && (
++            <BuyForm
++              key={page}
++              me={me}
++              clone={page.split("/")[1]}
++              login={() => needs(page)}
++              done={(id) => {
++                changed();
++                go("buy/" + id);
++              }}
++            />
++          )}
++          {active === "buy" && (
++            <BuyDetail
++              id={Number(page.split("/")[1])}
++              me={me}
++              rev={rev}
++              changed={changed}
++              go={go}
++              login={() => {
++                setNextPage(page);
++                setLoginOpen(true);
++              }}
++            />
++          )}
++          {active === "admin" && <Dashboard me={me} rev={rev} go={go} />}
++        </main>
++      </div>
++      <nav className="bottom">
++        {nav.map(([id, label, Icon]) => (
++          <button
++            key={id}
++            className={active === id ? "on" : ""}
++            onClick={() => (id === "create" ? needs(id) : go(id))}
++          >
++            <Icon size={20} />
++            {label}
++          </button>
++        ))}
++      </nav>
++      {login && (
++        <Modal title="모아담 시작하기" close={() => setLoginOpen(false)}>
++          <div className="filters">
++            {[
++              ["demo", "데모 체험"],
++              ["signin", "로그인"],
++              ["signup", "회원가입"],
++            ].map(([id, label]) => (
++              <button
++                key={id}
++                className={"chip " + (authMode === id ? "selected" : "")}
++                onClick={() => {
++                  setAuthMode(id);
++                  setAuthError("");
++                }}
++              >
++                {label}
++              </button>
++            ))}
++          </div>
++          {authMode === "demo" ? (
++            <>
++              <p>
++                이 브라우저 전용 데모 공간이에요. 같은 기숙사의 다른 계정으로
++                전환해 진행 상황을 확인할 수 있어요.
++              </p>
++              <label>
++                데모 계정
++                <select
++                  value={account}
++                  onChange={(e) => setAccount(e.target.value)}
++                >
++                  <option value="member">일반 참여자</option>
++                  <option value="host">학생 공구 개설자</option>
++                  <option value="operator">운영자</option>
++                  <optgroup label="기존 참여자의 수령 테스트">
++                    {[1, 2, 3, 4, 5, 6].map((i) => (
++                      <option key={i} value={"s" + i}>
++                        학생 {i + 2} (데모)
++                      </option>
++                    ))}
++                  </optgroup>
++                </select>
++              </label>
++            </>
++          ) : (
++            <>
++              <p>
++                가입한 계정은 같은 서버와 기숙사의 공구를 다른 브라우저에서도
++                함께 이용할 수 있어요.
++              </p>
++              <label>
++                아이디
++                <input
++                  value={handle}
++                  autoComplete="username"
++                  onChange={(e) => setHandle(e.target.value)}
++                  placeholder="영문 소문자 또는 숫자 4자 이상"
++                />
++              </label>
++              <label>
++                비밀번호
++                <input
++                  type="password"
++                  value={password}
++                  autoComplete={
++                    authMode === "signup" ? "new-password" : "current-password"
++                  }
++                  onChange={(e) => setPassword(e.target.value)}
++                  placeholder="10자 이상"
++                />
++              </label>
++            </>
++          )}
++          {authMode !== "signin" && (
++            <>
++              <label>
++                거주 기숙사
++                <select value={dorm} onChange={(e) => setDorm(e.target.value)}>
++                  <option value="A">A기숙사</option>
++                  <option value="B">B기숙사</option>
++                </select>
++              </label>
++              <p className="hint">
++                개발용 소속 인증이며 학교의 실제 거주 인증과 연결되지 않아요.
++              </p>
++              <label className="check">
++                <input
++                  type="checkbox"
++                  checked={notify}
++                  onChange={(e) => setNotify(e.target.checked)}
++                />
++                앱 안에서 진행 알림 받기
++              </label>
++            </>
++          )}
++          {authErr && (
++            <p className="error" role="alert">
++              {authErr}
++            </p>
++          )}
++          <button className="primary wide" disabled={loading} onClick={sign}>
++            {loading
++              ? "입장 중…"
++              : authMode === "demo"
++                ? "데모 인증하고 입장하기"
++                : authMode === "signup"
++                  ? "개발용 인증으로 가입하기"
++                  : "로그인하기"}
++          </button>
++        </Modal>
++      )}
++      {notice && (
++        <Modal title="알림" close={() => setNotificationsOpen(false)}>
++          {data.notifications?.length ? (
++            data.notifications.map((n: any) => (
++              <button
++                className="row"
++                key={n.id}
++                onClick={() => {
++                  setNotificationsOpen(false);
++                  go("buy/" + n.buy);
++                }}
++              >
++                <div>
++                  <b>{n.name}</b>
++                  <p>{n.body}</p>
++                  <small>{date(n.at)}</small>
++                </div>
++                <ChevronRight size={15} />
++              </button>
++            ))
++          ) : (
++            <p>새로운 알림이 없어요.</p>
++          )}
++        </Modal>
++      )}
++      {msg && (
++        <div className="toast" role="status">
++          {msg}
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/components/Flows.tsx b/components/Flows.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..9cc662339b66afc8aa53d749f4d3b97b7bc60c86
+--- /dev/null
++++ b/components/Flows.tsx
+@@ -0,0 +1,1050 @@
++"use client";
++import { productImage } from "./common";
++import { useEffect, useState } from "react";
++import { useForm } from "react-hook-form";
++import {
++  Clock3,
++  MapPin,
++  UsersRound,
++  Check,
++  ClipboardList,
++  ChevronLeft,
++  MessageCircle,
++  ExternalLink,
++} from "lucide-react";
++import { Button } from "./ui/button";
++import { api, date, won, Modal } from "./common";
++import { checks, day, responsibilities, stages } from "../lib/catalog";
++const local = (n: number) =>
++  new Date(n + 9 * 3600000).toISOString().slice(0, 16);
++const time = (s: string) => Date.parse(s + ":00+09:00");
++const order = [
++  "open",
++  "full",
++  "pending",
++  "ordered",
++  "shipping",
++  "ready",
++  "done",
++];
++const nextLabel: Record<string, string> = {
++  open: "모집 조기 마감",
++  full: "구매 확정 검토 시작",
++  pending: "판매처 주문 완료 기록",
++  ordered: "배송 시작 기록",
++  shipping: "수령 가능 안내",
++  ready: "공구 종료",
++};
++const describe = (e: unknown) =>
++  e instanceof Error ? e.message : "다시 시도해 주세요.";
++export function BuyForm({
++  me,
++  clone,
++  login,
++  done,
++}: {
++  me: any;
++  clone?: string;
++  login: () => void;
++  done: (id: number) => void;
++}) {
++  const {
++    register,
++    handleSubmit,
++    setValue,
++    watch,
++    formState: { isSubmitting },
++  } = useForm<any>({
++    defaultValues: {
++      mode: "equal",
++      category: "생활용품",
++      qty: 30,
++      lots: 6,
++      agree: [],
++    },
++  });
++  const [err, E] = useState(""),
++    [step, S] = useState(1);
++  const v = watch();
++  useEffect(() => {
++    if (clone && me)
++      api("buy/" + clone)
++        .then((g) => {
++          for (const k of [
++            "name",
++            "url",
++            "image",
++            "qty",
++            "lots",
++            "price",
++            "mode",
++            "category",
++            "place",
++            "kakao",
++          ])
++            setValue(k, g[k]);
++        })
++        .catch((e) => E(e.message));
++  }, [clone, me?.id, setValue]);
++  if (!me)
++    return (
++      <button className="primary" onClick={login}>
++        데모 로그인하고 공구 열기
++      </button>
++    );
++  const submit = handleSubmit(async (f) => {
++    E("");
++    if (step === 1) {
++      if (+f.qty % +f.lots !== 0) {
++        E("총 수량이 모집 단위 수로 나누어떨어져야 해요.");
++        return;
++      }
++      S(2);
++      return;
++    }
++    try {
++      const r = await api("act", {
++        ...f,
++        action: "create",
++        price: +f.price,
++        qty: +f.qty,
++        lots: +f.lots,
++        agree: responsibilities.map((_, i) => !!f.agree[i]),
++        deadline: time(f.deadline),
++        orderAt: time(f.orderAt),
++        pickup: time(f.pickup),
++      });
++      done(r.id);
++    } catch (e) {
++      E(describe(e));
++    }
++  });
++  return (
++    <div className="narrow">
++      <span className="eyebrow">공구 열기 · {step}/2</span>
++      <h1>{step === 1 ? "무엇을 함께 살까요?" : "어디서 나눌까요?"}</h1>
++      <p>
++        {me.role === "admin" ? "운영자" : "학생"} 공구로 {me.dorm}기숙사에
++        등록돼요.
++      </p>
++      <form className="box form" onSubmit={submit}>
++        {step === 1 ? (
++          <>
++            <label>
++              원본 상품 링크
++              <input
++                type="url"
++                required
++                placeholder="https://"
++                {...register("url")}
++              />
++            </label>
++            <p className="hint">
++              판매처의 상품 정보를 확인해 직접 입력해 주세요.
++            </p>
++            <label>
++              상품명
++              <input required maxLength={100} {...register("name")} />
++            </label>
++            <label>
++              상품 이미지 URL
++              <input required placeholder="https://…" {...register("image")} />
++            </label>
++            <label>
++              카테고리
++              <select {...register("category")}>
++                {["생활용품", "세탁·청소", "식품", "문구", "기타"].map((v) => (
++                  <option key={v}>{v}</option>
++                ))}
++              </select>
++            </label>
++            <div className="pair">
++              <label>
++                총 가격 (원)
++                <input
++                  type="number"
++                  min="1"
++                  max="100000000"
++                  required
++                  {...register("price")}
++                />
++              </label>
++              <label>
++                총 상품 수량 (개)
++                <input
++                  type="number"
++                  min="1"
++                  max="100000"
++                  required
++                  {...register("qty")}
++                />
++              </label>
++            </div>
++            <label>
++              분배 방식
++              <select {...register("mode")}>
++                <option value="equal">균등 분배 · 1인 1단위</option>
++                <option value="units">수량 지정 · 여러 단위 신청</option>
++              </select>
++            </label>
++            <label>
++              모집 단위 수
++              <input
++                type="number"
++                min="1"
++                max="10000"
++                required
++                {...register("lots")}
++              />
++            </label>
++            {+v.lots > 0 && +v.price > 0 && (
++              <p className="highlight">
++                1단위당 {v.qty / v.lots}개 · 약{" "}
++                {won(Math.floor(v.price / v.lots))}
++              </p>
++            )}
++          </>
++        ) : (
++          <>
++            {[
++              ["deadline", "모집 마감"],
++              ["orderAt", "예상 주문"],
++              ["pickup", "예정 수령"],
++            ].map(([k, l]) => (
++              <label key={k}>
++                {l} 일시 (한국 시간)
++                <input type="datetime-local" required {...register(k)} />
++              </label>
++            ))}
++            <label>
++              수령 장소
++              <input
++                required
++                maxLength={100}
++                placeholder="예: A기숙사 1층 로비"
++                {...register("place")}
++              />
++            </label>
++            <label>
++              카카오 오픈채팅 링크 (선택)
++              <input
++                type="url"
++                placeholder="https://open.kakao.com/…"
++                {...register("kakao")}
++              />
++            </label>
++            <h3>개설자 책임 확인</h3>
++            {responsibilities.map((v, i) => (
++              <label key={v} className="check">
++                <input type="checkbox" required {...register("agree." + i)} />
++                {v}
++              </label>
++            ))}
++            <button className="secondary" type="button" onClick={() => S(1)}>
++              이전 단계
++            </button>
++          </>
++        )}
++        {err && (
++          <p role="alert" className="error">
++            {err}
++          </p>
++        )}
++        <Button disabled={isSubmitting}>
++          {step === 1 ? "수령 일정 설정" : "동의하고 공구 열기"}
++        </Button>
++      </form>
++    </div>
++  );
++}
++export function BuyDetail({
++  id,
++  me,
++  rev,
++  changed,
++  go,
++  login,
++}: {
++  id: number;
++  me: any;
++  rev: number;
++  changed: () => void;
++  go: (v: string) => void;
++  login: () => void;
++}) {
++  const [dispute, setDispute] = useState(false);
++  const [g, G] = useState<any>(),
++    [err, E] = useState(""),
++    [modal, S] = useState(""),
++    [lots, L] = useState(1),
++    [busy, B] = useState(false),
++    [body, T] = useState(""),
++    [kind, K] = useState("파손"),
++    [photo, F] = useState(""),
++    [info, I] = useState(""),
++    [issue, U] = useState(0);
++  useEffect(() => {
++    let ok = true;
++    if (!me) return;
++    const load = () =>
++      api("buy/" + id)
++        .then((x) => {
++          if (ok) G(x);
++        })
++        .catch((e) => {
++          if (ok) E(e.message);
++        });
++    load();
++    const iv = setInterval(load, 8000);
++    return () => {
++      ok = false;
++      clearInterval(iv);
++    };
++  }, [id, me?.id, rev]);
++  useEffect(() => {
++    G(undefined);
++    E("");
++    S("");
++    L(1);
++    I("");
++  }, [id, me?.id]);
++  async function action(action: string, extra: any = {}) {
++    if (busy) return;
++    B(true);
++    E("");
++    try {
++      await api("act", { action, id, ...extra });
++      G(await api("buy/" + id));
++      S("");
++      T("");
++      F("");
++      I("처리했어요.");
++      changed();
++    } catch (e) {
++      E(describe(e));
++    } finally {
++      B(false);
++    }
++  }
++  function open(v: string) {
++    setDispute(false);
++    S(v);
++    E("");
++    T("");
++    F("");
++  }
++  if (!me)
++    return (
++      <button className="primary" onClick={login}>
++        데모 로그인하고 상세 보기
++      </button>
++    );
++  if (!g || g.id !== id)
++    return (
++      <div className="box" role="status">
++        {err || "공구 정보를 불러오고 있어요…"}
++      </div>
++    );
++  const unit = g.qty / g.lots,
++    amount =
++      Math.floor(((g.used + lots) * g.price) / g.lots) -
++      Math.floor((g.used * g.price) / g.lots),
++    terminal = ["done", "stopped", "failed"].includes(g.status),
++    canJoin =
++      me.dorm === g.dorm && g.status === "open" && !g.mine && me.id !== g.owner,
++    canChat = g.chat && (!terminal || Date.now() - g.closed < 7 * day);
++  return (
++    <div className="detail">
++      <button className="link" onClick={() => go("explore")}>
++        <ChevronLeft size={16} /> 공구 탐색
++      </button>
++      <div className="detailhead">
++        <img src={productImage(g.image)} alt={g.name} />
++        <div>
++          <span className="eyebrow">
++            {g.official ? "운영자 공구" : "학생 공구"} · {g.category}
++          </span>
++          <h1>{g.name}</h1>
++          <h2>
++            {won(Math.floor(g.price / g.lots))} <small>/ {unit}개</small>
++          </h2>
++          <div className="progress">
++            <i style={{ width: (g.used / g.lots) * 100 + "%" }} />
++          </div>
++          <b>
++            {stages[g.status]} · {g.used}/{g.lots}단위
++          </b>
++          <p>
++            <UsersRound size={16} /> {g.people}명 참여
++          </p>
++          <p>
++            <MapPin size={16} /> {g.place}
++          </p>
++          <p>
++            <Clock3 size={16} /> {date(g.deadline)} 마감
++          </p>
++          <button
++            className="secondary"
++            onClick={async () => {
++              try {
++                await navigator.clipboard.writeText(location.href);
++                I("공구 링크를 복사했어요.");
++              } catch {
++                open("share");
++              }
++            }}
++          >
++            공구 링크 복사
++          </button>
++        </div>
++      </div>
++      {info && (
++        <p role="status" className="hint">
++          {info}
++        </p>
++      )}
++      {err && !modal && (
++        <p role="alert" className="error">
++          {err}
++        </p>
++      )}
++      {terminal && (
++        <section className="box">
++          <h2>공구 요약</h2>
++          <p>
++            {stages[g.status]} · {g.people}명 · 전체 물품 {g.qty}개
++          </p>
++          <p>
++            {g.place} · {date(g.pickup)}
++          </p>
++          {g.mine && <p>내 분담금 {won(g.mine.amount)}</p>}
++          {g.manager && (
++            <p>
++              신고·요청 {g.issues.length}건 · 취소 내역 {g.requests.length}건
++            </p>
++          )}
++        </section>
++      )}
++      <div className="cols">
++        <section className="box">
++          <h2>공구 안내</h2>
++          <dl>
++            {[
++              ["총 상품 가격", won(g.price)],
++              ["분배 수량", g.qty + "개 / " + g.lots + "단위"],
++              ["예상 주문", date(g.order_at)],
++              ["수령 일시", date(g.pickup)],
++              ["수령 방법", g.place + "에서 개설자에게 수령"],
++              ["개설자", g.host],
++            ].map(([k, v]) => (
++              <div key={k}>
++                <dt>{k}</dt>
++                <dd>{v}</dd>
++              </div>
++            ))}
++          </dl>
++          {g.url && (
++            <a className="link" href={g.url} target="_blank" rel="noreferrer">
++              판매처 상품 보기 <ExternalLink size={14} />
++            </a>
++          )}
++          <p className="hint">
++            개설자가 주문과 소분, 현장 전달을 맡아요. 목표 미달 시 참여와 모의
++            결제는 취소돼요. 주문 완료 이후 취소는 검토가 필요해요.
++          </p>
++        </section>
++        <section className="box">
++          <h2>진행 상태</h2>
++          {order.includes(g.status) ? (
++            <ol className="timeline">
++              {order.map((s, i) => (
++                <li
++                  key={s}
++                  className={i <= order.indexOf(g.status) ? "reached" : ""}
++                >
++                  <i>
++                    {i < order.indexOf(g.status) ? <Check size={12} /> : null}
++                  </i>
++                  {stages[s]}
++                  {s === g.status && <b>현재</b>}
++                </li>
++              ))}
++            </ol>
++          ) : (
++            <p>{stages[g.status]}</p>
++          )}
++        </section>
++      </div>
++      {g.mine && (
++        <section className="box">
++          <h2>내 참여 내역</h2>
++          <p>
++            {g.mine.lots * unit}개 · 분담금 {won(g.mine.amount)} ·{" "}
++            {["failed", "stopped"].includes(g.status)
++              ? "모의 결제 취소"
++              : "결제 시뮬레이션"}
++          </p>
++          {g.mine.student_at && (
++            <p>
++              수령 확인 완료 ·{" "}
++              {g.mine.host_at
++                ? "개설자 전달 확인 완료"
++                : "개설자 전달 확인 대기"}
++            </p>
++          )}
++          {!terminal && (
++            <button className="secondary" onClick={() => open("cancel")}>
++              {order.indexOf(g.status) < 3 ? "참여 취소" : "주문 후 취소 요청"}
++            </button>
++          )}
++        </section>
++      )}
++      {g.manager && (
++        <section className="box">
++          <h2>개설자 관리</h2>
++          {g.status === "shipping" &&
++            checks.map((c, i) => (
++              <label className="check" key={c}>
++                <input
++                  type="checkbox"
++                  checked={!!(g.checklist & (1 << i))}
++                  disabled={busy}
++                  onChange={(e) =>
++                    action("check", { bit: i, checked: e.target.checked })
++                  }
++                />
++                {c}
++              </label>
++            ))}
++          {nextLabel[g.status] && (
++            <button className="primary" onClick={() => open("advance")}>
++              {nextLabel[g.status]}
++            </button>
++          )}
++          {!terminal && (
++            <button className="secondary" onClick={() => open("schedule")}>
++              수령 일정 변경
++            </button>
++          )}
++          {me.role === "admin" && !terminal && (
++            <button className="secondary" onClick={() => open("stop")}>
++              운영 중단
++            </button>
++          )}
++          {g.status === "failed" && (
++            <button className="primary" onClick={() => go("create/" + id)}>
++              이 조건으로 재개설
++            </button>
++          )}
++          <h3>참여 현황 · {g.people}명</h3>
++          {g.members.map((m: any) => (
++            <div className="row" key={m.id}>
++              <div>
++                <b>{m.name}</b>
++                <p>
++                  {m.lots * unit}개 · {won(m.amount)} ·{" "}
++                  {m.payment === "void" ? "모의 결제 취소" : "모의 결제"} ·{" "}
++                  {m.host_at
++                    ? "전달 완료"
++                    : m.student_at
++                      ? "참여자 수령 확인"
++                      : "수령 대기"}
++                </p>
++              </div>
++              {g.status === "ready" && m.student_at && !m.host_at && (
++                <button
++                  className="chip"
++                  disabled={busy}
++                  onClick={() => action("handoff", { pid: m.id })}
++                >
++                  전달 확인
++                </button>
++              )}
++            </div>
++          ))}
++        </section>
++      )}
++      {g.requests.length > 0 && (
++        <section className="box">
++          <h2>취소 내역</h2>
++          {g.requests.map((r: any) => (
++            <div key={r.id} className="row">
++              <span>
++                {r.name} · {r.result}
++              </span>
++              {g.manager && r.result === "검토 중" && (
++                <div>
++                  {["승인", "반려"].map((result) => (
++                    <button
++                      className="chip"
++                      disabled={busy}
++                      key={result}
++                      onClick={() =>
++                        action("resolveCancel", { request: r.id, result })
++                      }
++                    >
++                      {result}
++                    </button>
++                  ))}
++                </div>
++              )}
++            </div>
++          ))}
++        </section>
++      )}
++      {(g.chat || g.manager) && (
++        <section className="box">
++          <h2>문의 및 문제 접수</h2>
++          {g.chat && (
++            <button className="secondary" onClick={() => open("issue")}>
++              문제 신고 · 재수령 요청
++            </button>
++          )}
++          {g.issues.map((r: any) => (
++            <div className="row" key={r.id}>
++              <div>
++                <b>
++                  {r.kind} · {r.status === "open" ? "접수" : "처리 완료"}
++                </b>
++                <p>{r.body}</p>
++                {r.photo && (
++                  <img
++                    className="reportphoto"
++                    src={r.photo}
++                    alt="신고 첨부 사진"
++                  />
++                )}
++                {r.result && <p>답변 · {r.result}</p>}
++              </div>
++              {g.manager && r.status === "open" && (
++                <button
++                  className="chip"
++                  onClick={() => {
++                    U(r.id);
++                    open("resolve");
++                  }}
++                >
++                  처리
++                </button>
++              )}
++            </div>
++          ))}
++        </section>
++      )}
++      {g.chat && (
++        <details className="box">
++          <summary>
++            <MessageCircle size={18} /> 공구 대화방
++          </summary>
++          <p className="highlight">
++            고정 공지 · {stages[g.status]} · {date(g.pickup)} · {g.place}
++          </p>
++          {g.kakao && (
++            <a href={g.kakao} target="_blank" rel="noreferrer">
++              개설자 오픈채팅 열기
++            </a>
++          )}
++          {g.messages.map((m: any) => (
++            <div className="message" key={m.id}>
++              <b>{m.name}</b>
++              <small>{date(m.at)}</small>
++              <p>{m.body}</p>
++            </div>
++          ))}
++          {canChat ? (
++            <form
++              onSubmit={(e) => {
++                e.preventDefault();
++                action("chat", { body });
++              }}
++            >
++              <label>
++                메시지
++                <input
++                  maxLength={1000}
++                  value={body}
++                  onChange={(e) => T(e.target.value)}
++                  required
++                />
++              </label>
++              <button className="secondary" disabled={busy}>
++                보내기
++              </button>
++            </form>
++          ) : (
++            <p>종료된 대화방은 읽기 전용이에요.</p>
++          )}
++        </details>
++      )}
++      {(canJoin || (g.status === "ready" && g.mine && !g.mine.student_at)) && (
++        <div className="sticky">
++          <b>
++            {canJoin ? "1단위 " + won(Math.floor(g.price / g.lots)) : g.place}
++          </b>
++          <button
++            className="primary"
++            onClick={() => open(canJoin ? "join" : "receive")}
++          >
++            {canJoin ? "공구 참여하기" : "수령 완료 확인"}
++          </button>
++        </div>
++      )}
++      {modal && (
++        <Modal
++          title={
++            (
++              {
++                join: "참여 내용 확인",
++                cancel: "참여 취소 확인",
++                advance: nextLabel[g.status],
++                stop: "공구 운영 중단",
++                issue: "문제 접수",
++                resolve: "처리 결과 기록",
++                schedule: "수령 일정 변경",
++                receive: "물품 수령 확인",
++                share: "공구 공유 링크",
++              } as any
++            )[modal]
++          }
++          close={() => S("")}
++        >
++          {modal === "share" && (
++            <input
++              readOnly
++              value={location.href}
++              onFocus={(e) => e.target.select()}
++            />
++          )}
++          {modal === "join" && (
++            <>
++              <h3>{g.name}</h3>
++              <label>
++                신청 단위
++                <input
++                  type="number"
++                  min={1}
++                  max={g.mode === "equal" ? 1 : g.lots - g.used}
++                  value={lots}
++                  onChange={(e) => L(+e.target.value)}
++                  disabled={g.mode === "equal"}
++                />
++              </label>
++              <p className="highlight">
++                수령 {lots * unit}개 · 예상 분담금 {won(amount)}
++              </p>
++              <p>
++                {g.place}에서 수령 · {date(g.deadline)} 모집 마감
++              </p>
++              <p>
++                목표 미달 시 모의 결제는 취소돼요. 주문 완료 이후에는 개설자
++                또는 운영자가 취소 요청을 검토해요. 원 단위 나머지 배분으로 최종
++                금액이 조정될 수 있어요.
++              </p>
++              <p className="hint">
++                개발용 결제 시뮬레이션이며 실제 금전 거래는 없어요.
++              </p>
++              <button
++                className="primary wide"
++                disabled={busy}
++                onClick={() => action("join", { lots })}
++              >
++                확인하고 참여하기
++              </button>
++            </>
++          )}
++          {["advance", "stop", "receive", "cancel"].includes(modal) && (
++            <>
++              <p>
++                {modal === "advance"
++                  ? g.status === "open"
++                    ? "목표 미달 상태에서 마감하면 모집 실패 처리되고 모든 모의 결제가 취소돼요."
++                    : g.status === "pending"
++                      ? "판매처에서 직접 주문을 마쳤다면 기록해 주세요. 앱에서 주문하거나 결제하지 않아요."
++                      : "이 단계의 작업을 마쳤나요? 참여자에게 상태 변경을 안내해요."
++                  : modal === "stop"
++                    ? "모집과 진행을 중단하고 모의 결제를 취소해요."
++                    : modal === "receive"
++                      ? "현장에서 신청한 수량을 모두 받았나요?"
++                      : order.indexOf(g.status) < 3
++                        ? "참여를 취소하고 모집 수량을 다시 계산해요."
++                        : "주문 후 취소는 검토 요청으로 접수돼요."}
++              </p>
++              <button
++                disabled={busy}
++                className="primary wide"
++                onClick={() =>
++                  action(
++                    modal,
++                    modal === "advance"
++                      ? {
++                          to:
++                            g.status === "open"
++                              ? "failed"
++                              : order[order.indexOf(g.status) + 1],
++                        }
++                      : {},
++                  )
++                }
++              >
++                확인
++              </button>
++            </>
++          )}
++          {modal === "schedule" && (
++            <form
++              onSubmit={(e) => {
++                e.preventDefault();
++                const f = new FormData(e.currentTarget);
++                action("schedule", {
++                  pickup: time(String(f.get("pickup"))),
++                  place: f.get("place"),
++                });
++              }}
++            >
++              <label>
++                수령 장소
++                <input name="place" required defaultValue={g.place} />
++              </label>
++              <label>
++                수령 시간 (한국 시간)
++                <input
++                  name="pickup"
++                  type="datetime-local"
++                  defaultValue={local(g.pickup)}
++                  required
++                />
++              </label>
++              <button disabled={busy} className="primary">
++                일정 변경 안내
++              </button>
++            </form>
++          )}
++          {(modal === "issue" || modal === "resolve") && (
++            <form
++              onSubmit={(e) => {
++                e.preventDefault();
++                action(
++                  modal,
++                  modal === "issue"
++                    ? { kind, body, photo }
++                    : { issue, result: body, dispute },
++                );
++              }}
++            >
++              {modal === "issue" && (
++                <>
++                  <label>
++                    사유
++                    <select value={kind} onChange={(e) => K(e.target.value)}>
++                      {["파손", "누락", "재수령 일정", "기타"].map((k) => (
++                        <option key={k}>{k}</option>
++                      ))}
++                    </select>
++                  </label>
++                  <label>
++                    사진 첨부 (선택, 최대 500KB)
++                    <input
++                      type="file"
++                      accept="image/png,image/jpeg,image/webp"
++                      onChange={async (e) => {
++                        const f = e.target.files?.[0];
++                        F("");
++                        if (!f) return;
++                        if (f.size > 500000) {
++                          E("500KB 이하 사진을 선택해 주세요.");
++                          e.target.value = "";
++                          return;
++                        }
++                        const reader = new FileReader();
++                        reader.onload = () => F(String(reader.result));
++                        reader.readAsDataURL(f);
++                      }}
++                    />
++                  </label>
++                </>
++              )}
++              {modal === "resolve" &&
++                me.role === "admin" &&
++                g.status === "ready" && (
++                  <label className="check">
++                    <input
++                      type="checkbox"
++                      checked={dispute}
++                      onChange={(e) => setDispute(e.target.checked)}
++                    />
++                    미수령 분쟁 종결 및 해당 참여자의 모의 결제 취소
++                  </label>
++                )}
++              <label>
++                {modal === "resolve"
++                  ? "확정한 일정 또는 처리 결과"
++                  : "상황 설명 또는 희망 수령 일시"}
++                <textarea
++                  required
++                  maxLength={800}
++                  value={body}
++                  onChange={(e) => T(e.target.value)}
++                />
++              </label>
++              <button className="primary" disabled={busy}>
++                등록하기
++              </button>
++            </form>
++          )}
++          {err && (
++            <p className="error" role="alert">
++              {err}
++            </p>
++          )}
++        </Modal>
++      )}
++    </div>
++  );
++}
++export function Dashboard({
++  me,
++  rev,
++  go,
++}: {
++  me: any;
++  rev: number;
++  go: (v: string) => void;
++}) {
++  const [d, D] = useState<any>(),
++    [f, F] = useState("전체"),
++    [dr, B] = useState("전체"),
++    [err, E] = useState("");
++  useEffect(() => {
++    if (me?.role === "admin")
++      api("admin")
++        .then(D)
++        .catch((e) => E(e.message));
++  }, [me?.id, rev]);
++  if (me?.role !== "admin") return <p>운영자 로그인이 필요해요.</p>;
++  if (!d) return <p>{err || "통계를 불러오는 중…"}</p>;
++  const rows = d.rows,
++    filled = rows.filter((g: any) => g.filled),
++    late = (g: any) =>
++      ["full", "pending"].includes(g.status) && g.order_at < Date.now(),
++    byCat = new Map<string, number>();
++  rows.forEach((g: any) =>
++    byCat.set(g.category, (byCat.get(g.category) || 0) + g.people),
++  );
++  const popular = [...byCat].sort((a, b) => b[1] - a[1])[0];
++  return (
++    <>
++      <h1>운영 대시보드</h1>
++      <p>{me.demo ? "데모 공간" : "공유 캠퍼스"}의 A·B기숙사 현황이에요.</p>
++      <div className="stats">
++        {[
++          ["개설 공구", rows.length + "건"],
++          [
++            "목표 달성률",
++            Math.round((filled.length / (rows.length || 1)) * 100) + "%",
++          ],
++          ["현재 참여", d.participations + "건"],
++          [
++            "평균 모집 시간",
++            filled.length
++              ? (
++                  filled.reduce(
++                    (a: number, g: any) => a + g.filled - g.created,
++                    0,
++                  ) /
++                  filled.length /
++                  3600000
++                ).toFixed(1) + "시간"
++              : "—",
++          ],
++          ["인기 유형", popular?.[0] || "—"],
++          ["반복 참여자", d.repeat + "명"],
++        ].map(([k, v]) => (
++          <div className="box" key={k}>
++            <small>{k}</small>
++            <h2>{v}</h2>
++          </div>
++        ))}
++      </div>
++      <button className="primary" onClick={() => go("create")}>
++        운영자 공구 열기
++      </button>
++      <div className="section">
++        <h2>공구 관리</h2>
++        <select
++          aria-label="기숙사 필터"
++          value={dr}
++          onChange={(e) => B(e.target.value)}
++        >
++          {["전체", "A", "B"].map((s) => (
++            <option key={s}>{s}</option>
++          ))}
++        </select>
++        <select
++          aria-label="관리 상태"
++          value={f}
++          onChange={(e) => F(e.target.value)}
++        >
++          {["전체", "주문 지연", ...Object.values(stages)].map((s) => (
++            <option key={s}>{s}</option>
++          ))}
++        </select>
++      </div>
++      <div className="box">
++        {rows
++          .filter(
++            (g: any) =>
++              (dr === "전체" || dr === g.dorm) &&
++              (f === "전체" ||
++                (f === "주문 지연" ? late(g) : stages[g.status] === f)),
++          )
++          .map((g: any) => (
++            <div className="row" key={g.id}>
++              <div>
++                <b>{g.name}</b>
++                <p>
++                  {g.dorm}기숙사 · {stages[g.status]} · {g.people}명
++                </p>
++              </div>
++              {
++                <button className="chip" onClick={() => go("buy/" + g.id)}>
++                  관리
++                </button>
++              }
++            </div>
++          ))}
++      </div>
++      <h2>확인할 취소·미수령</h2>
++      <div className="box">
++        {d.queue.length
++          ? d.queue.map((r: any, i: number) => (
++              <div className="row" key={i}>
++                <span>
++                  {r.dorm}기숙사 · {r.name} · {r.kind}
++                </span>
++                {
++                  <button className="chip" onClick={() => go("buy/" + r.buy)}>
++                    확인
++                  </button>
++                }
++              </div>
++            ))
++          : "현재 확인할 건이 없어요."}
++      </div>
++      <h2>접수된 문제</h2>
++      <div className="box">
++        {d.entries.length
++          ? d.entries.map((r: any) => (
++              <div className="row" key={r.id}>
++                <span>
++                  {r.dorm}기숙사 · {r.name} · {r.kind}
++                </span>
++                <button className="chip" onClick={() => go("buy/" + r.buy)}>
++                  {r.status === "open" ? "접수 확인" : "처리 완료"}
++                </button>
++              </div>
++            ))
++          : "접수된 문제가 없어요."}
++      </div>
++    </>
++  );
++}
+diff --git a/components/common.tsx b/components/common.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..085617f6e6eddd2b99a23a378e1a68146db08df9
+--- /dev/null
++++ b/components/common.tsx
+@@ -0,0 +1,161 @@
++"use client";
++import {
++  MapPin,
++  UsersRound,
++  Clock3,
++  Bookmark,
++  ShieldCheck,
++  GraduationCap,
++  X,
++} from "lucide-react";
++import { useRef, useEffect, useId } from "react";
++import { day, stages } from "../lib/catalog";
++export const won = (n: number) =>
++  new Intl.NumberFormat("ko-KR").format(n) + "원";
++export const date = (n: number) =>
++  new Intl.DateTimeFormat("ko-KR", {
++    timeZone: "Asia/Seoul",
++    month: "short",
++    day: "numeric",
++    hour: "2-digit",
++    minute: "2-digit",
++    hour12: false,
++  }).format(n);
++export const dday = (t: number) => {
++  const days = Math.ceil((t - Date.now()) / day);
++  return days <= 0 ? "마감" : days === 1 ? "마감 임박" : "D-" + days;
++};
++export function productImage(src: string) {
++  return src.startsWith("/art/")
++    ? (process.env.NEXT_PUBLIC_BASE_PATH || "") + src
++    : src;
++}
++export async function api(path: string, data?: unknown) {
++  const endpoint = process.env.NEXT_PUBLIC_MOADAM_API;
++  const headers: Record<string, string> = {};
++  if (data) headers["content-type"] = "application/json";
++  if (endpoint) {
++    const session = sessionStorage.getItem("moadam-session");
++    const space = sessionStorage.getItem("moadam-space");
++    if (session) headers["x-moadam-session"] = session;
++    if (space && path === "login") headers["x-moadam-space"] = space;
++  }
++  const r = await fetch((endpoint || "/api") + "/" + path, {
++    headers,
++    cache: "no-store",
++    method: data ? "POST" : "GET",
++    ...(data
++      ? {
++          body: JSON.stringify(data),
++        }
++      : {}),
++  });
++  const v = await r.json();
++  if (!r.ok) throw Error(v.error || "다시 시도해 주세요.");
++  if (endpoint) {
++    if (v.session) sessionStorage.setItem("moadam-session", v.session);
++    if (v.spaceKey) sessionStorage.setItem("moadam-space", v.spaceKey);
++    if (path === "logout") sessionStorage.removeItem("moadam-session");
++  }
++  return v;
++}
++export function Modal({
++  title,
++  close,
++  children,
++}: {
++  title: string;
++  close: () => void;
++  children: React.ReactNode;
++}) {
++  const titleId = useId();
++  const ref = useRef<HTMLDialogElement>(null);
++  useEffect(() => {
++    ref.current?.showModal();
++  }, []);
++  return (
++    <dialog
++      aria-labelledby={titleId}
++      ref={ref}
++      onCancel={close}
++      className="modal"
++    >
++      <div className="section">
++        <h2 id={titleId}>{title}</h2>
++        <button className="icon" onClick={close} aria-label="닫기">
++          <X />
++        </button>
++      </div>
++      {children}
++    </dialog>
++  );
++}
++export function Card({
++  g,
++  open,
++  saved,
++  toggle,
++}: {
++  g: any;
++  open: () => void;
++  saved: boolean;
++  toggle: () => void;
++}) {
++  return (
++    <article className="product">
++      <div className={"photo " + g.category}>
++        <button
++          aria-label={g.name + " 상세 보기"}
++          className="photobtn"
++          onClick={open}
++        >
++          <img src={productImage(g.image)} alt={g.name} />
++        </button>
++        <span
++          className={
++            "time " +
++            (g.status === "open" && dday(g.deadline) === "마감 임박"
++              ? "urgent"
++              : "")
++          }
++        >
++          <Clock3 size={13} />
++          {g.status === "open" ? dday(g.deadline) : stages[g.status]}
++        </span>
++        <button
++          aria-label={saved ? "찜 해제" : "찜하기"}
++          aria-pressed={saved}
++          className={"bookmark " + (saved ? "saved" : "")}
++          onClick={toggle}
++        >
++          <Bookmark size={17} fill={saved ? "currentColor" : "none"} />
++        </button>
++      </div>
++      <button className="cardbody" onClick={open}>
++        <small className={"host " + (g.official ? "official" : "")}>
++          {g.official ? <ShieldCheck size={14} /> : <GraduationCap size={15} />}{" "}
++          {g.official ? "운영자 공구" : "학생 공구"}
++          <span>· {g.category}</span>
++        </small>
++        <h3>{g.name}</h3>
++        <div className="cost">
++          {won(Math.floor(g.price / g.lots))}{" "}
++          <small>/ {g.qty / g.lots}개</small>
++        </div>
++        <div className="progress">
++          <i style={{ width: (100 * g.used) / g.lots + "%" }} />
++        </div>
++        <div className="cardfoot">
++          <span>
++            <UsersRound size={14} />
++            {g.people}명 참여
++          </span>
++          <span>
++            <MapPin size={13} />
++            {g.place}
++          </span>
++        </div>
++      </button>
++    </article>
++  );
++}
+diff --git a/components/ui/button.tsx b/components/ui/button.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c42b375f3771e0f0f36d3592115ca2751a7ba7c
+--- /dev/null
++++ b/components/ui/button.tsx
+@@ -0,0 +1,29 @@
++import * as React from "react";
++import { Slot } from "@radix-ui/react-slot";
++import { cva, type VariantProps } from "class-variance-authority";
++import { cn } from "../../lib/utils";
++const styles = cva(
++  "inline-flex items-center justify-center disabled:pointer-events-none disabled:opacity-50",
++  {
++    variants: {
++      variant: { default: "primary", secondary: "secondary", ghost: "link" },
++    },
++    defaultVariants: { variant: "default" },
++  },
++);
++export function Button({
++  asChild = false,
++  variant,
++  className,
++  ...props
++}: React.ComponentProps<"button"> &
++  VariantProps<typeof styles> & { asChild?: boolean }) {
++  const Component = asChild ? Slot : "button";
++  return (
++    <Component
++      data-slot="button"
++      className={cn(styles({ variant }), className)}
++      {...props}
++    />
++  );
++}
+diff --git a/001_initial.sql b/db/001_initial.sql
+similarity index 100%
+rename from 001_initial.sql
+rename to db/001_initial.sql
+diff --git a/e2e/app.spec.ts b/e2e/app.spec.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef9dab592b722e6d6d43ab4beb79101c24b73461
+--- /dev/null
++++ b/e2e/app.spec.ts
+@@ -0,0 +1,103 @@
++import { test, expect } from "@playwright/test";
++test("모바일 탐색·기숙사 인증·부담금·참여·취소", async ({ page }) => {
++  await page.setViewportSize({ width: 390, height: 844 });
++  await page.goto("/");
++  await expect(
++    page.getByRole("button", { name: "홈", exact: true }).last(),
++  ).toBeVisible();
++  expect(
++    await page.evaluate(
++      () => document.documentElement.scrollWidth <= innerWidth,
++    ),
++  ).toBe(true);
++  await page
++    .getByRole("button", { name: "도톰한 3겹 데일리 화장지 상세 보기" })
++    .click();
++  await page.getByRole("button", { name: "데모 인증하고 입장하기" }).click();
++  await page.getByRole("button", { name: "공구 참여하기" }).click();
++  await expect(page.getByRole("dialog")).toContainText(
++    "수령 5개 · 예상 분담금 3,150원",
++  );
++  await page.getByRole("button", { name: "확인하고 참여하기" }).click();
++  await expect(
++    page.getByRole("heading", { name: "내 참여 내역" }),
++  ).toBeVisible();
++  await page.getByRole("button", { name: "참여 취소", exact: true }).click();
++  await page
++    .getByRole("dialog")
++    .getByRole("button", { name: "확인", exact: true })
++    .click();
++  await expect(
++    page.getByRole("button", { name: "공구 참여하기" }),
++  ).toBeVisible();
++});
++test("데스크톱 학생 개설 폼·공유 링크·다른 사용자 동시 신청", async ({
++  page,
++  browser,
++  baseURL,
++}) => {
++  const suffix = Date.now().toString(),
++    password = "demo-password-123";
++  await page.goto("/");
++  await page
++    .getByRole("button", { name: "공구 열기", exact: true })
++    .first()
++    .click();
++  await page.getByRole("button", { name: "회원가입", exact: true }).click();
++  await page.getByLabel("아이디", { exact: true }).fill("host" + suffix);
++  await page.getByLabel("비밀번호", { exact: true }).fill(password);
++  await page.getByRole("button", { name: "개발용 인증으로 가입하기" }).click();
++  await page.getByLabel("원본 상품 링크").fill("https://example.org/demo");
++  await page.getByLabel("상품명", { exact: true }).fill("테스트 휴지");
++  await page.getByLabel("상품 이미지 URL").fill("/art/tissue.webp");
++  await page.getByLabel("총 가격 (원)").fill("7200");
++  await page.getByLabel("모집 단위 수").fill("1");
++  await page.getByRole("button", { name: "수령 일정 설정" }).click();
++  const date = (n: number) =>
++    new Date(Date.now() + 86400000 * n).toISOString().slice(0, 16);
++  await page.getByLabel("모집 마감 일시").fill(date(2));
++  await page.getByLabel("예상 주문 일시").fill(date(3));
++  await page.getByLabel("예정 수령 일시").fill(date(4));
++  await page.getByLabel("수령 장소", { exact: true }).fill("1층 로비");
++  for (const c of await page.locator("main input[type=checkbox]").all())
++    await c.check();
++  await page.getByRole("button", { name: "동의하고 공구 열기" }).click();
++  await expect(page.getByRole("heading", { name: "공구 안내" })).toBeVisible();
++  const url = page.url(),
++    id = Number(url.split("/").at(-1));
++  const contexts = await Promise.all([
++    browser.newContext({ baseURL }),
++    browser.newContext({ baseURL }),
++  ]);
++  try {
++    for (const [i, c] of contexts.entries()) {
++      const signup = await c.request.post("/api/signup", {
++        data: {
++          handle: "student" + i + suffix,
++          password,
++          dorm: "A",
++          notify: true,
++        },
++      });
++      expect(signup.ok()).toBe(true);
++    }
++    const result = await Promise.all(
++      contexts.map((c) =>
++        c.request.post("/api/act", { data: { action: "join", id, lots: 1 } }),
++      ),
++    );
++    expect(result.filter((r) => r.ok())).toHaveLength(1);
++    const p = await contexts[result.findIndex((x) => x.ok())].newPage();
++    await p.goto(url);
++    await expect(
++      p.getByRole("heading", { name: "내 참여 내역" }),
++    ).toBeVisible();
++    await expect(p.getByText(/분담금 7,200원/)).toBeVisible();
++  } finally {
++    await Promise.all(contexts.map((c) => c.close()));
++  }
++});
++test("비로그인 상세와 운영 API 차단", async ({ request }) => {
++  for (const path of ["admin", "buy/1"])
++    expect((await request.get("/api/" + path)).status()).toBe(401);
++});
+diff --git a/catalog.ts b/lib/catalog.ts
+similarity index 100%
+rename from catalog.ts
+rename to lib/catalog.ts
+diff --git a/db.ts b/lib/db.ts
+similarity index 100%
+rename from db.ts
+rename to lib/db.ts
+diff --git a/service.ts b/lib/service.ts
+similarity index 100%
+rename from service.ts
+rename to lib/service.ts
+diff --git a/utils.ts b/lib/utils.ts
+similarity index 100%
+rename from utils.ts
+rename to lib/utils.ts
+diff --git a/pages-site/app/layout.tsx b/pages-site/app/layout.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..338f696d8eba230310ecf54504473a55b87f101c
+--- /dev/null
++++ b/pages-site/app/layout.tsx
+@@ -0,0 +1 @@
++export { default, metadata } from "../../app/layout";
+diff --git a/pages-site/app/page.tsx b/pages-site/app/page.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..94a97aeeb55880d04e409d95d0cebf32da024563
+--- /dev/null
++++ b/pages-site/app/page.tsx
+@@ -0,0 +1 @@
++export { default } from "../../app/page";
+diff --git a/pages-site/next.config.mjs b/pages-site/next.config.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..33e155fd8c0506caf9cf968c723b1f1e12edc5c1
+--- /dev/null
++++ b/pages-site/next.config.mjs
+@@ -0,0 +1,3 @@
++const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "/moadam";
++if (!process.env.NEXT_PUBLIC_MOADAM_API) throw new Error("Set NEXT_PUBLIC_MOADAM_API before building Pages.");
++export default { output: "export", basePath, trailingSlash: true, env: { NEXT_PUBLIC_BASE_PATH: basePath } };
+diff --git a/pages-site/postcss.config.mjs b/pages-site/postcss.config.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9b5c43d12ca5dd106ede4e9cec451f4ede60fef
+--- /dev/null
++++ b/pages-site/postcss.config.mjs
+@@ -0,0 +1 @@
++export default { plugins: { "@tailwindcss/postcss": {} } };
+diff --git a/pages-site/tsconfig.json b/pages-site/tsconfig.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2c93cecd631a48075c85bddb0683511710069da
+--- /dev/null
++++ b/pages-site/tsconfig.json
+@@ -0,0 +1,6 @@
++{
++  "extends": "../tsconfig.json",
++  "compilerOptions": { "paths": { "@/*": ["../*"] } },
++  "include": ["next-env.d.ts", "app/**/*.tsx", ".next/types/**/*.ts"],
++  "exclude": ["node_modules"]
++}
+diff --git a/detergent.webp b/public/art/detergent.webp
+similarity index 100%
+rename from detergent.webp
+rename to public/art/detergent.webp
+diff --git a/hero.webp b/public/art/hero.webp
+similarity index 100%
+rename from hero.webp
+rename to public/art/hero.webp
+diff --git a/pens.webp b/public/art/pens.webp
+similarity index 100%
+rename from pens.webp
+rename to public/art/pens.webp
+diff --git a/ramen.webp b/public/art/ramen.webp
+similarity index 100%
+rename from ramen.webp
+rename to public/art/ramen.webp
+diff --git a/snacks.webp b/public/art/snacks.webp
+similarity index 100%
+rename from snacks.webp
+rename to public/art/snacks.webp
+diff --git a/tissue.webp b/public/art/tissue.webp
+similarity index 100%
+rename from tissue.webp
+rename to public/art/tissue.webp
+diff --git a/wipes.webp b/public/art/wipes.webp
+similarity index 100%
+rename from wipes.webp
+rename to public/art/wipes.webp
+diff --git a/scripts/dev.mjs b/scripts/dev.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..af8912cca6f99b31df443dca0594f4a3642ba716
+--- /dev/null
++++ b/scripts/dev.mjs
+@@ -0,0 +1,12 @@
++import { spawn } from "node:child_process";
++const args = process.argv
++  .slice(2)
++  .filter((x) => x !== "--strictPort")
++  .map((x) => (x === "--host" ? "--hostname" : x));
++const child = spawn(
++  process.execPath,
++  ["node_modules/next/dist/bin/next", "dev", "--webpack", ...args],
++  { stdio: "inherit" },
++);
++for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => child.kill(sig));
++child.on("exit", (code) => process.exit(code ?? 0));
+diff --git a/scripts/operator.ts b/scripts/operator.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..004ef49eb2c05f9bfaef5211ee96d75d4bd4fa64
+--- /dev/null
++++ b/scripts/operator.ts
+@@ -0,0 +1,17 @@
++import { one, run, tx } from "../lib/db.ts";
++const handle = process.argv[2];
++if (!handle) throw Error("사용법: npm run operator -- 가입아이디");
++tx(() => {
++  const user = one(
++    "SELECT id FROM profiles WHERE space='shared-test-campus' AND handle=?",
++    handle,
++  );
++  if (!user) throw Error("공유 캠퍼스에 가입한 아이디를 찾을 수 없습니다.");
++  run("UPDATE profiles SET role='admin' WHERE id=?", user.id);
++  run(
++    "INSERT INTO audit_logs(uid,event,at) VALUES(?,'서버 관리자가 운영자 지정',?)",
++    user.id,
++    Date.now(),
++  );
++});
++console.log("운영자 권한을 부여했습니다.");
+diff --git a/scripts/sweep.ts b/scripts/sweep.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..72ecdf96e7e650cb1a5a0e8891fae6473a2e0624
+--- /dev/null
++++ b/scripts/sweep.ts
+@@ -0,0 +1,2 @@
++import { tx, sweep } from "../lib/db.ts";
++tx(sweep);
+diff --git a/supabase/config.toml b/supabase/config.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c2d94c8532b71ca6cc02bdcbd32da43bdfd2d03
+--- /dev/null
++++ b/supabase/config.toml
+@@ -0,0 +1,3 @@
++project_id = "moadam"
++[functions.moadam]
++verify_jwt = false
+diff --git a/supabase/functions/moadam/catalog.ts b/supabase/functions/moadam/catalog.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ed8c05f9002e74ddc7e84fe2ee9a691bfc250b8
+--- /dev/null
++++ b/supabase/functions/moadam/catalog.ts
+@@ -0,0 +1,34 @@
++export const stages: Record<string, string> = {
++  open: "모집 중",
++  full: "모집 완료",
++  pending: "구매 확정 대기",
++  ordered: "주문 완료",
++  shipping: "배송 중",
++  ready: "수령 가능",
++  done: "수령 완료",
++  failed: "모집 실패",
++  stopped: "운영 중단",
++};
++export const catalog = [
++  ["도톰한 3겹 데일리 화장지", "tissue", "생활용품", 18900, 30, 6, 5],
++  ["올인원 세탁세제 캡슐", "detergent", "세탁·청소", 24000, 60, 6, 3],
++  ["도톰한 대용량 물티슈", "wipes", "생활용품", 14400, 12, 6, 4],
++  ["얼큰한 컵라면 12개입", "ramen", "식품", 12000, 12, 4, 2],
++  ["달콤바삭 과자 모음", "snacks", "식품", 18000, 24, 6, 2],
++  ["데일리 필기구 세트", "pens", "문구", 10000, 20, 5, 1],
++] as const;
++export const checks = [
++  "택배 수령",
++  "상품 수량 확인",
++  "참여자별 분배",
++  "수령 장소 준비",
++  "수령 안내 확인",
++];
++export const responsibilities = [
++  "모집이 완료되면 상품을 주문할게요.",
++  "배송된 상품을 받고 수량을 확인할게요.",
++  "신청 수량에 맞춰 소분할게요.",
++  "안내한 일정과 장소에서 전달할게요.",
++  "상품 문제와 일정 변경을 안내할게요.",
++];
++export const day = 86400000;
+diff --git a/supabase/functions/moadam/db.ts b/supabase/functions/moadam/db.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1591afae89b3aa4872e3a690dcadc7e9194f565d
+--- /dev/null
++++ b/supabase/functions/moadam/db.ts
+@@ -0,0 +1,388 @@
++import {
++  randomBytes,
++  createHash,
++  timingSafeEqual,
++  pbkdf2Sync,
++} from "node:crypto";
++import { Buffer } from "node:buffer";
++import { day, catalog, stages } from "./catalog.ts";
++import { one, all, run, tx } from "./postgres.ts";
++export { one, all, run, tx };
++export function insist(ok: unknown, message: string): asserts ok {
++  if (!ok) throw new Error(message);
++}
++const token = () => randomBytes(32).toString("hex");
++const hash = (s: string) => createHash("sha256").update(s).digest("hex");
++export const clock = () => Date.now();
++export const log = async (b: number, u: number | null, e: string) =>
++  await run(
++    "INSERT INTO audit_logs(buy,uid,event,at) VALUES(?,?,?,?)",
++    b,
++    u,
++    e,
++    clock(),
++  );
++export async function note(
++  u: number,
++  b: number,
++  s: string,
++  key: string | null = null,
++) {
++  await run(
++    "INSERT INTO notifications(uid,buy,body,at,dedupe) SELECT id,?,?,?,? FROM profiles WHERE id=? AND notify=1 ON CONFLICT DO NOTHING",
++    b,
++    s,
++    clock(),
++    key,
++    u,
++  );
++}
++export async function broadcast(b: number, s: string) {
++  for (const p of await all(
++    "SELECT owner AS u FROM group_buys WHERE id=? UNION SELECT uid FROM group_buy_participants WHERE buy=? AND active=1",
++    b,
++    b,
++  ))
++    await note(p.u, b, s);
++}
++export async function state(b: number, u: number | null, s: string) {
++  await run(
++    "UPDATE group_buys SET status=?,closed=CASE WHEN ? IN ('done','failed','stopped') THEN ?::bigint ELSE NULL END WHERE id=?",
++    s,
++    s,
++    clock(),
++    b,
++  );
++  await broadcast(b, stages[s]);
++  await log(b, u, stages[s]);
++}
++export async function participant(b: number, u: number, q: number) {
++  const pid = Number(
++    (
++      await run(
++        "INSERT INTO group_buy_participants(buy,uid,lots) VALUES(?,?,?) RETURNING id",
++        b,
++        u,
++        q,
++      )
++    ).lastInsertRowid,
++  );
++  await run("INSERT INTO payment_simulations VALUES(?,'demo')", pid);
++  await run("INSERT INTO pickup_confirmations(pid) VALUES(?)", pid);
++  return pid;
++}
++export async function price(b: number) {
++  const { price, lots } = await one(
++    "SELECT i.price,g.lots FROM group_buys g JOIN group_buy_items i ON i.buy=g.id WHERE g.id=?",
++    b,
++  );
++  let offset = 0;
++  for (const p of await all(
++    "SELECT * FROM group_buy_participants WHERE active=1 AND buy=? ORDER BY id",
++    b,
++  )) {
++    const cost =
++      Math.floor(((offset + p.lots) * price) / lots) -
++      Math.floor((offset * price) / lots);
++    await run(
++      "UPDATE group_buy_participants SET amount=? WHERE id=?",
++      cost,
++      p.id,
++    );
++    offset += p.lots;
++  }
++  return offset;
++}
++export async function addBuy(u: number, d: string, x: any) {
++  const id = Number(
++    (
++      await run(
++        "INSERT INTO group_buys(owner,dorm,status,mode,lots,deadline,order_at,created,kakao) VALUES(?,?,'open',?,?,?,?,?,?) RETURNING id",
++        u,
++        d,
++        x.mode,
++        x.lots,
++        x.deadline,
++        x.orderAt,
++        clock(),
++        x.kakao || "",
++      )
++    ).lastInsertRowid,
++  );
++  await run(
++    "INSERT INTO group_buy_items VALUES(?,?,?,?,?,?,?)",
++    id,
++    x.name,
++    x.image,
++    x.url,
++    x.price,
++    x.qty,
++    x.category,
++  );
++  await run(
++    "INSERT INTO pickup_schedules VALUES(?,?,?)",
++    id,
++    x.place,
++    x.pickup,
++  );
++  await run("INSERT INTO chat_rooms VALUES(?)", id);
++  await log(id, u, "공구 개설");
++  return id;
++}
++async function seed(space: string) {
++  await run("INSERT INTO spaces VALUES(?)", space);
++  for (const d of ["A", "B"]) {
++    const ids: number[] = [];
++    for (const [i, h] of [
++      "member",
++      "host",
++      "operator",
++      "s1",
++      "s2",
++      "s3",
++      "s4",
++      "s5",
++      "s6",
++    ].entries()) {
++      const id = Number(
++        (
++          await run(
++            "INSERT INTO profiles(space,handle,name,role) VALUES(?,?,?,?) RETURNING id",
++            space,
++            d + h,
++            (["참여자", "학생 개설자", "운영팀"][i] || "학생 " + i) + " (데모)",
++            i === 2 ? "admin" : "student",
++          )
++        ).lastInsertRowid,
++      );
++      await run("INSERT INTO dormitory_memberships VALUES(?,?)", id, d);
++      ids.push(id);
++    }
++    for (let j = 0; j < 12; j++) {
++      const [name, art, cat, cost, qty, lots, n] = catalog[j % 6];
++      const status = ["full", "ordered", "shipping", "ready", "done", "failed"][
++        j - 6
++      ];
++      const b = await addBuy(ids[j % 6 < 3 ? 2 : 1], d, {
++        mode: j % 2 ? "units" : "equal",
++        lots,
++        deadline: clock() + (j + 1) * day,
++        orderAt: clock() + (j + 2) * day,
++        pickup: clock() + (j + 4) * day,
++        place: d + "기숙사 1층 로비",
++        name,
++        image: "/art/" + art + ".webp",
++        url: "",
++        price: cost,
++        qty,
++        category: cat,
++      });
++      const people = j < 6 ? n : status === "failed" ? 1 : lots;
++      for (let k = 0; k < people; k++) {
++        const pid = await participant(
++          b,
++          j >= 6 && k === 0 ? ids[0] : ids[3 + k],
++          1,
++        );
++        if (status === "done")
++          await run(
++            "UPDATE pickup_confirmations SET student_at=?,host_at=?,host_uid=? WHERE pid=?",
++            clock(),
++            clock(),
++            ids[2],
++            pid,
++          );
++      }
++      await price(b);
++      if (status) {
++        await run(
++          "UPDATE group_buys SET status=?,filled=?,closed=? WHERE id=?",
++          status,
++          status === "failed" ? null : clock(),
++          ["done", "failed"].includes(status) ? clock() : null,
++          b,
++        );
++        if (["ordered", "shipping", "ready", "done"].includes(status))
++          await run(
++            "INSERT INTO orders VALUES(?,?,?)",
++            b,
++            ids[j % 6 < 3 ? 2 : 1],
++            clock(),
++          );
++        if (status === "failed") await voidPayments(b);
++      }
++    }
++  }
++}
++export async function voidPayments(b: number) {
++  await run(
++    "UPDATE payment_simulations SET status='void' WHERE pid IN (SELECT id FROM group_buy_participants WHERE buy=?)",
++    b,
++  );
++}
++export async function login(
++  spaceKey: string,
++  account: string,
++  dorm: string,
++  notify: boolean,
++) {
++  insist(
++    ["member", "host", "operator", "s1", "s2", "s3", "s4", "s5", "s6"].includes(
++      account,
++    ) && ["A", "B"].includes(dorm),
++    "데모 계정과 기숙사를 선택해 주세요.",
++  );
++  return await tx(async () => {
++    let space = hash(spaceKey);
++    if (!spaceKey || !(await one("SELECT id FROM spaces WHERE id=?", space))) {
++      spaceKey = token();
++      space = hash(spaceKey);
++      await seed(space);
++    }
++    const u = await one(
++      "SELECT id FROM profiles WHERE space=? AND handle=?",
++      space,
++      dorm + account,
++    );
++    await run("UPDATE profiles SET notify=? WHERE id=?", +notify, u.id);
++    const session = token();
++    await run(
++      "INSERT INTO sessions VALUES(?,?,?)",
++      hash(session),
++      u.id,
++      clock() + 7 * day,
++    );
++    return { session, spaceKey };
++  });
++}
++export const user = async (s: string) =>
++  await one(
++    "SELECT p.*,m.dorm FROM sessions s JOIN profiles p ON p.id=s.uid JOIN dormitory_memberships m ON m.uid=p.id WHERE s.token=? AND expires>?",
++    hash(s),
++    clock(),
++  );
++export async function logout(s: string) {
++  await run("DELETE FROM sessions WHERE token=?", hash(s));
++}
++export async function sweep() {
++  for (const g of await all(
++    "SELECT * FROM group_buys WHERE status='open' AND deadline<=?",
++    clock(),
++  )) {
++    await state(g.id, null, "failed");
++    await voidPayments(g.id);
++  }
++  for (const g of await all(
++    "SELECT g.*,p.space FROM group_buys g JOIN profiles p ON p.id=g.owner WHERE status IN ('full','pending') AND order_at<?",
++    clock(),
++  )) {
++    await note(g.owner, g.id, "주문 예정일이 지났어요.", "late" + g.id);
++    if (g.order_at + day < clock())
++      for (const a of await all(
++        "SELECT p.id FROM profiles p JOIN dormitory_memberships m ON m.uid=p.id WHERE p.space=? AND role='admin' AND m.dorm=?",
++        g.space,
++        g.dorm,
++      ))
++        await note(
++          a.id,
++          g.id,
++          "주문이 하루 이상 지연됐어요.",
++          "adminlate" + g.id,
++        );
++  }
++  for (const p of await all(
++    "SELECT p.uid,p.buy FROM group_buy_participants p JOIN pickup_confirmations c ON c.pid=p.id JOIN pickup_schedules s ON s.buy=p.buy JOIN group_buys g ON g.id=p.buy WHERE active=1 AND g.status='ready' AND s.at<? AND c.student_at IS NULL",
++    clock(),
++  ))
++    await note(
++      p.uid,
++      p.buy,
++      "수령 예정일이 지났어요. 재수령 일정을 요청할 수 있어요.",
++      "miss" + p.buy + "-" + p.uid,
++    );
++}
++export async function accountLogin(input: any, signup: boolean) {
++  const handle = String(input.handle || "")
++      .trim()
++      .toLowerCase(),
++    password = input.password;
++  insist(
++    /^[a-z0-9_-]{4,32}$/.test(handle),
++    "아이디는 영문 소문자·숫자 등 4~32자로 입력해 주세요.",
++  );
++  insist(
++    typeof password === "string" &&
++      password.length >= 10 &&
++      password.length <= 128,
++    "비밀번호는 10~128자로 입력해 주세요.",
++  );
++  const space = "shared-test-campus",
++    existing = await one(
++      "SELECT p.*,c.salt,c.digest FROM profiles p JOIN credentials c ON c.uid=p.id WHERE p.space=? AND p.handle=?",
++      space,
++      handle,
++    );
++  let id = existing?.id;
++  if (signup) {
++    insist(!existing, "이미 등록한 아이디예요.");
++    insist(["A", "B"].includes(input.dorm), "기숙사를 선택해 주세요.");
++    const salt = token(),
++      digest = pbkdf2Sync(password, salt, 600000, 32, "sha256").toString("hex");
++    id = await tx(async () => {
++      await run("INSERT INTO spaces VALUES(?) ON CONFLICT DO NOTHING", space);
++      const u = Number(
++        (
++          await run(
++            "INSERT INTO profiles(space,handle,name,role,notify) VALUES(?,?,?,'student',?) RETURNING id",
++            space,
++            handle,
++            handle,
++            +!!input.notify,
++          )
++        ).lastInsertRowid,
++      );
++      await run("INSERT INTO credentials VALUES(?,?,?)", u, salt, digest);
++      await run("INSERT INTO dormitory_memberships VALUES(?,?)", u, input.dorm);
++      return u;
++    });
++  } else {
++    const limit = await one(
++      "SELECT * FROM login_attempts WHERE handle=?",
++      handle,
++    );
++    insist(
++      !limit || limit.until <= clock() || limit.attempts < 12,
++      "잠시 후 다시 시도해 주세요.",
++    );
++    const digest = pbkdf2Sync(
++      password,
++      existing?.salt || "absent-account",
++      600000,
++      32,
++      "sha256",
++    );
++    if (
++      !existing ||
++      !timingSafeEqual(digest, Buffer.from(existing.digest, "hex"))
++    ) {
++      await run(
++        "INSERT INTO login_attempts VALUES(?,?,?) ON CONFLICT(handle) DO UPDATE SET until=CASE WHEN login_attempts.until > ? THEN login_attempts.until ELSE excluded.until END, attempts=CASE WHEN login_attempts.until > ? THEN login_attempts.attempts+1 ELSE 1 END",
++        handle,
++        1,
++        clock() + 600000,
++        clock(),
++        clock(),
++      );
++      throw Error("아이디와 비밀번호를 확인해 주세요.");
++    }
++    await run("DELETE FROM login_attempts WHERE handle=?", handle);
++  }
++  const session = token();
++  await run(
++    "INSERT INTO sessions VALUES(?,?,?)",
++    hash(session),
++    id,
++    clock() + 7 * day,
++  );
++  return session;
++}
+diff --git a/supabase/functions/moadam/index.ts b/supabase/functions/moadam/index.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ad6abe5b1355147e67f275c2920e463eb9f59d8
+--- /dev/null
++++ b/supabase/functions/moadam/index.ts
+@@ -0,0 +1,68 @@
++import { login, logout, accountLogin, user } from "./db.ts";
++import { browse, detail, admin, act } from "./service.ts";
++
++const origin = Deno.env.get("MOADAM_ORIGIN") || "https://yang051228.github.io";
++Deno.serve(async (req) => {
++  const headers = {
++    "access-control-allow-origin": origin,
++    "access-control-allow-headers":
++      "content-type, x-moadam-session, x-moadam-space, apikey",
++    "access-control-allow-methods": "GET, POST, OPTIONS",
++    "cache-control": "no-store",
++    vary: "Origin",
++  };
++  const json = (value: unknown, status = 200) =>
++    Response.json(value, { headers, status });
++  if (req.headers.get("origin") !== origin)
++    return json({ error: "허용되지 않은 출처예요." }, 403);
++  if (req.method === "OPTIONS")
++    return new Response(null, { status: 204, headers });
++  const path = new URL(req.url).pathname.split("/moadam/").pop();
++  const session = req.headers.get("x-moadam-session") || "";
++  try {
++    const me = session ? await user(session) : null;
++    if (req.method === "GET") {
++      if (!me)
++        return path === "home"
++          ? json({ me: null })
++          : json({ error: "로그인이 필요해요." }, 401);
++      if (path === "home") return json(await browse(me));
++      if (path === "admin") return json(await admin(me));
++      if (path && /^buy\/\d+$/.test(path))
++        return json(await detail(me, Number(path.slice(4))));
++    } else if (req.method === "POST") {
++      const body = await req.text();
++      if (body.length > 800000)
++        return json({ error: "첨부파일을 줄여 주세요." }, 413);
++      const input = JSON.parse(body || "{}");
++      if (path === "login" || path === "signin" || path === "signup") {
++        const result =
++          path === "login"
++            ? await login(
++                req.headers.get("x-moadam-space") || "",
++                input.account,
++                input.dorm,
++                input.notify !== false,
++              )
++            : { session: await accountLogin(input, path === "signup") };
++        if (session) await logout(session);
++        return json(result);
++      }
++      if (!me) return json({ error: "로그인이 필요해요." }, 401);
++      if (path === "logout") {
++        await logout(session);
++        return json({ ok: true });
++      }
++      if (path === "act") return json(await act(me, input));
++    }
++    return json({ error: "요청을 찾을 수 없어요." }, 404);
++  } catch (err) {
++    const message =
++      err instanceof Error &&
++      err.name === "Error" &&
++      /[가-힣]/.test(err.message)
++        ? err.message
++        : "요청을 처리하지 못했어요. 입력값을 확인해 주세요.";
++    return json({ error: message }, 400);
++  }
++});
+diff --git a/supabase/functions/moadam/postgres.ts b/supabase/functions/moadam/postgres.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef43647a7a412a14c0c31a0bc13a02c23ec79aab
+--- /dev/null
++++ b/supabase/functions/moadam/postgres.ts
+@@ -0,0 +1,57 @@
++import postgres from "npm:postgres@3.4.7";
++import { AsyncLocalStorage } from "node:async_hooks";
++
++const database = postgres(Deno.env.get("SUPABASE_DB_URL")!, {
++  prepare: false,
++  max: 1,
++  types: {
++    numericResult: {
++      to: 20,
++      from: [20, 1700],
++      serialize: String,
++      parse: Number,
++    },
++  },
++});
++const current = new AsyncLocalStorage<
++  ReturnType<typeof database.reserve> extends Promise<infer T> ? T : never
++>();
++type Value = string | number | null;
++
++export async function tx<T>(work: () => Promise<T>): Promise<T> {
++  if (current.getStore()) return work();
++  const connection = await database.reserve();
++  try {
++    await connection.unsafe("begin");
++    // The original MVP serializes allocation, cancellations and deadline sweeps together.
++    await connection.unsafe("select pg_advisory_xact_lock(77662201)");
++    await connection.unsafe("set local search_path = moadam, pg_catalog");
++    const value = await current.run(connection, work);
++    await connection.unsafe("commit");
++    return value;
++  } catch (error) {
++    await connection.unsafe("rollback");
++    throw error;
++  } finally {
++    connection.release();
++  }
++}
++export async function all(
++  statement: string,
++  ...values: Value[]
++): Promise<any[]> {
++  const connection = current.getStore();
++  if (!connection) return tx(() => all(statement, ...values));
++  let index = 0;
++  return connection.unsafe(
++    statement.replace(/\?/g, () => "$" + ++index),
++    values,
++  );
++}
++export async function one(statement: string, ...values: Value[]) {
++  return (await all(statement, ...values))[0];
++}
++export async function run(statement: string, ...values: Value[]) {
++  const rows = await all(statement, ...values);
++  return { lastInsertRowid: rows[0]?.id };
++}
+diff --git a/supabase/functions/moadam/service.ts b/supabase/functions/moadam/service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a933be7c17d6a2c02c6f51fbf64c60c13c0738f1
+--- /dev/null
++++ b/supabase/functions/moadam/service.ts
+@@ -0,0 +1,503 @@
++import { z } from "npm:zod@4.3.6";
++import {
++  all,
++  one,
++  run,
++  tx,
++  clock,
++  insist,
++  addBuy,
++  participant,
++  price,
++  state,
++  log,
++  note,
++  broadcast,
++  voidPayments,
++  sweep,
++} from "./db.ts";
++import { day, responsibilities } from "./catalog.ts";
++const web = z
++  .url()
++  .refine((s) => /^https?:\/\//i.test(s), "http(s) 링크를 입력해 주세요.");
++const timestamp = z.number().int().positive().max(8640000000000000);
++const create = z.object({
++  name: z.string().trim().min(1).max(100),
++  image: z.union([
++    web,
++    z
++      .string()
++      .regex(/^\/art\/(tissue|detergent|wipes|ramen|snacks|pens)\.webp$/),
++  ]),
++  url: web,
++  price: z.number().int().min(1).max(100000000),
++  qty: z.number().int().min(1).max(100000),
++  lots: z.number().int().min(1).max(10000),
++  mode: z.enum(["equal", "units"]),
++  deadline: timestamp,
++  orderAt: timestamp,
++  pickup: timestamp,
++  place: z.string().trim().min(1).max(100),
++  category: z.enum(["생활용품", "세탁·청소", "식품", "문구", "기타"]),
++  kakao: z
++    .union([
++      z.literal(""),
++      z.url().refine((s) => new URL(s).origin === "https://open.kakao.com"),
++    ])
++    .default(""),
++  agree: z.array(z.literal(true)).length(responsibilities.length),
++});
++const query = `SELECT g.*,i.name,i.image,i.url,i.price,i.qty,i.category,s.place,s.at AS pickup,p.name AS host,p.role='admin' AS official,p.space,
++(SELECT coalesce(sum(lots),0) FROM group_buy_participants WHERE buy=g.id AND active=1) AS used,
++(SELECT count(*) FROM group_buy_participants WHERE buy=g.id AND active=1) AS people
++FROM group_buys g JOIN group_buy_items i ON i.buy=g.id JOIN pickup_schedules s ON s.buy=g.id JOIN profiles p ON p.id=g.owner`;
++async function group(u: any, id: number) {
++  const g = await one(
++    query + " WHERE g.id=? AND p.space=? AND (g.dorm=? OR ?=1)",
++    id,
++    u.space,
++    u.dorm,
++    Number(u.role === "admin"),
++  );
++  insist(g, "이 기숙사에서 확인할 수 없는 공구예요.");
++  return g;
++}
++const member = async (g: number, u: number) =>
++  await one(
++    "SELECT p.*,c.student_at,c.host_at FROM group_buy_participants p JOIN pickup_confirmations c ON c.pid=p.id WHERE p.buy=? AND p.uid=? AND active=1",
++    g,
++    u,
++  );
++const manageable = (u: any, g: any) => g.owner === u.id || u.role === "admin";
++export async function browse(u: any) {
++  return await tx(async () => {
++    await sweep();
++    const groups = await Promise.all(
++      (
++        await all(
++          query +
++            " WHERE p.space=? AND g.dorm=? ORDER BY (g.status='open') DESC,g.deadline,g.id",
++          u.space,
++          u.dorm,
++        )
++      ).map(async (g) => ({
++        ...g,
++        space: undefined,
++        kakao: undefined,
++        mine: !!(await member(g.id, u.id)),
++      })),
++    );
++    return {
++      me: {
++        id: u.id,
++        name: u.name,
++        demo: u.space !== "shared-test-campus",
++        dorm: u.dorm,
++        role: u.role,
++        notify: !!u.notify,
++      },
++      groups,
++      notifications: await all(
++        "SELECT n.*,i.name FROM notifications n JOIN group_buy_items i ON i.buy=n.buy WHERE uid=? ORDER BY n.id DESC LIMIT 100",
++        u.id,
++      ),
++    };
++  });
++}
++export async function detail(u: any, id: number) {
++  return await tx(async () => {
++    await sweep();
++    const g = await group(u, id),
++      mine = await member(id, u.id),
++      manager = manageable(u, g),
++      chat = !!mine || u.id === g.owner;
++    return {
++      ...g,
++      space: undefined,
++      mine,
++      manager,
++      chat,
++      kakao: chat ? g.kakao : "",
++      history: await all(
++        "SELECT event,at FROM audit_logs WHERE buy=? ORDER BY id DESC LIMIT 30",
++        id,
++      ),
++      members: manager
++        ? await all(
++            "SELECT p.id,p.uid,p.lots,p.amount,u.name,c.student_at,c.host_at,s.status AS payment FROM group_buy_participants p JOIN profiles u ON u.id=p.uid JOIN pickup_confirmations c ON c.pid=p.id JOIN payment_simulations s ON s.pid=p.id WHERE p.buy=? AND active=1",
++            id,
++          )
++        : [],
++      messages: chat
++        ? await all(
++            "SELECT m.id,m.body,m.at,p.name FROM chat_messages m JOIN profiles p ON p.id=m.uid WHERE buy=? ORDER BY m.id",
++            id,
++          )
++        : [],
++      issues: await all(
++        "SELECT * FROM issue_reports WHERE buy=? AND (uid=? OR ?=1) ORDER BY id DESC",
++        id,
++        u.id,
++        +manager,
++      ),
++      requests: await all(
++        "SELECT c.*,u.name FROM cancellation_requests c JOIN group_buy_participants p ON p.id=c.pid JOIN profiles u ON u.id=p.uid WHERE p.buy=? AND (p.uid=? OR ?=1)",
++        id,
++        u.id,
++        +manager,
++      ),
++    };
++  });
++}
++export async function admin(u: any) {
++  insist(u.role === "admin", "운영자 계정으로 로그인해 주세요.");
++  return await tx(async () => {
++    await sweep();
++    const rows = await all(query + " WHERE p.space=?", u.space);
++    const entries = await all(
++      "SELECT r.*,i.name,g.dorm FROM issue_reports r JOIN group_buys g ON g.id=r.buy JOIN profiles p ON p.id=g.owner JOIN group_buy_items i ON i.buy=g.id WHERE p.space=?",
++      u.space,
++    );
++    const participants = await all(
++      "SELECT t.uid,t.buy FROM group_buy_participants t JOIN profiles p ON p.id=t.uid WHERE p.space=? AND active=1",
++      u.space,
++    );
++    const queue = await all(
++      "SELECT g.id AS buy,g.dorm,i.name,'취소 요청' AS kind FROM cancellation_requests c JOIN group_buy_participants t ON t.id=c.pid JOIN group_buys g ON g.id=t.buy JOIN group_buy_items i ON i.buy=g.id JOIN profiles p ON p.id=g.owner WHERE p.space=? AND c.result='검토 중' UNION ALL SELECT g.id,g.dorm,i.name,'미수령' FROM group_buys g JOIN group_buy_items i ON i.buy=g.id JOIN profiles p ON p.id=g.owner JOIN pickup_schedules s ON s.buy=g.id WHERE p.space=? AND g.status='ready' AND s.at<? AND EXISTS(SELECT 1 FROM group_buy_participants t JOIN pickup_confirmations c ON c.pid=t.id WHERE t.buy=g.id AND t.active=1 AND c.student_at IS NULL)",
++      u.space,
++      u.space,
++      clock(),
++    );
++    return {
++      queue,
++      rows: rows.map(({ space, kakao, ...r }) => r),
++      entries,
++      participations: participants.length,
++      repeat: [...new Set(participants.map((p) => p.uid))].filter(
++        (id) => participants.filter((p) => p.uid === id).length > 1,
++      ).length,
++    };
++  });
++}
++async function cancel(b: number, p: any) {
++  await run("UPDATE group_buy_participants SET active=0 WHERE id=?", p.id);
++  await run("UPDATE payment_simulations SET status='void' WHERE pid=?", p.id);
++  await price(b);
++}
++export async function act(u: any, a: any) {
++  return await tx(async () => {
++    await sweep();
++    if (a.action === "seen") {
++      await run("UPDATE notifications SET seen=1 WHERE uid=?", u.id);
++      return {};
++    }
++    if (a.action === "create") {
++      const x = create.safeParse(a);
++      insist(x.success, "상품 정보와 링크, 개설자 동의를 확인해 주세요.");
++      const v = x.data;
++      insist(
++        v.qty % v.lots === 0,
++        "총 수량을 모집 단위 수로 나눌 수 있어야 해요.",
++      );
++      insist(
++        v.deadline > clock() &&
++          v.orderAt >= v.deadline &&
++          v.pickup >= v.orderAt,
++        "모집 마감, 주문 예정, 수령 예정 순서로 미래 일정을 입력해 주세요.",
++      );
++      return { id: await addBuy(u.id, u.dorm, v) };
++    }
++    const g = await group(u, Number(a.id)),
++      id = g.id,
++      p = await member(id, u.id),
++      manager = manageable(u, g);
++    const manage = () =>
++      insist(manager, "개설자 또는 담당 운영자만 처리할 수 있어요.");
++    const before = ["open", "full", "pending"].includes(g.status),
++      terminal = ["done", "failed", "stopped"].includes(g.status);
++    switch (a.action) {
++      case "join": {
++        insist(
++          u.dorm === g.dorm &&
++            !p &&
++            g.owner !== u.id &&
++            g.status === "open" &&
++            g.deadline > clock(),
++          "현재 참여할 수 없는 공구예요.",
++        );
++        insist(
++          Number.isInteger(a.lots) &&
++            a.lots > 0 &&
++            a.lots <= g.lots - g.used &&
++            (g.mode === "units" || a.lots === 1),
++          "남은 모집 단위 안에서 선택해 주세요.",
++        );
++        await participant(id, u.id, a.lots);
++        if ((await price(id)) === g.lots) {
++          await run("UPDATE group_buys SET filled=? WHERE id=?", clock(), id);
++          await state(id, u.id, "full");
++        }
++        await log(id, u.id, "공구 참여");
++        await note(u.id, id, "참여가 확정됐어요.");
++        break;
++      }
++      case "cancel": {
++        insist(p && !terminal, "취소할 수 있는 참여 내역이 없어요.");
++        if (before) {
++          await cancel(id, p);
++          await run(
++            "INSERT INTO cancellation_requests(pid,at,result) VALUES(?,?,'취소 완료')",
++            p.id,
++            clock(),
++          );
++          await run("UPDATE group_buys SET filled=NULL WHERE id=?", id);
++          await state(id, u.id, g.deadline > clock() ? "open" : "failed");
++          if (g.deadline <= clock()) await voidPayments(id);
++          await note(u.id, id, "참여 취소 완료");
++        } else {
++          insist(
++            !(await one(
++              "SELECT id FROM cancellation_requests WHERE pid=? AND result='검토 중'",
++              p.id,
++            )),
++            "이미 접수한 요청이에요.",
++          );
++          await run(
++            "INSERT INTO cancellation_requests(pid,at,result) VALUES(?,?,'검토 중')",
++            p.id,
++            clock(),
++          );
++          await note(g.owner, id, "취소 요청이 접수됐어요.");
++          await log(id, u.id, "취소 요청 접수");
++        }
++        break;
++      }
++      case "resolveCancel": {
++        manage();
++        const r = await one(
++          "SELECT c.*,p.uid FROM cancellation_requests c JOIN group_buy_participants p ON p.id=c.pid WHERE c.id=? AND p.buy=? AND result='검토 중'",
++          a.request,
++          id,
++        );
++        insist(r, "처리할 요청이 없어요.");
++        const result = z.enum(["승인", "반려"]).parse(a.result);
++        await run(
++          "UPDATE cancellation_requests SET result=? WHERE id=?",
++          result,
++          r.id,
++        );
++        if (result === "승인") {
++          await run(
++            "UPDATE group_buy_participants SET active=0 WHERE id=?",
++            r.pid,
++          );
++          await run(
++            "UPDATE payment_simulations SET status='void' WHERE pid=?",
++            r.pid,
++          );
++        }
++        await note(r.uid, id, "취소 요청 " + result);
++        await log(id, u.id, "주문 후 취소 " + result);
++        break;
++      }
++      case "advance": {
++        manage();
++        const next: Record<string, string> = {
++          open: "failed",
++          full: "pending",
++          pending: "ordered",
++          ordered: "shipping",
++          shipping: "ready",
++          ready: "done",
++        };
++        insist(
++          next[g.status] && a.to === next[g.status],
++          "현재 단계에서 가능한 작업을 다시 확인해 주세요.",
++        );
++        if (a.to === "failed") await voidPayments(id);
++        if (a.to === "ordered")
++          await run("INSERT INTO orders VALUES(?,?,?)", id, u.id, clock());
++        if (a.to === "ready")
++          insist(g.checklist === 31, "분배 준비 항목을 모두 확인해 주세요.");
++        if (a.to === "done") {
++          insist(
++            !(await one(
++              "SELECT c.id FROM cancellation_requests c JOIN group_buy_participants p ON p.id=c.pid WHERE p.buy=? AND c.result='검토 중'",
++              id,
++            )),
++            "접수된 취소 요청을 먼저 처리해 주세요.",
++          );
++          insist(
++            !(await one(
++              "SELECT p.id FROM group_buy_participants p JOIN pickup_confirmations c ON c.pid=p.id WHERE p.buy=? AND active=1 AND (c.student_at IS NULL OR c.host_at IS NULL)",
++              id,
++            )),
++            "모든 참여자와 개설자의 수령 확인이 필요해요.",
++          );
++          insist(
++            !(await one(
++              "SELECT id FROM issue_reports WHERE buy=? AND status='open'",
++              id,
++            )),
++            "접수된 문제를 먼저 처리해 주세요.",
++          );
++        }
++        await state(id, u.id, a.to);
++        break;
++      }
++      case "stop":
++        insist(
++          u.role === "admin" && !terminal,
++          "진행 중인 공구만 운영자가 중단할 수 있어요.",
++        );
++        await state(id, u.id, "stopped");
++        await voidPayments(id);
++        break;
++      case "check":
++        manage();
++        insist(
++          g.status === "shipping" &&
++            Number.isInteger(a.bit) &&
++            a.bit >= 0 &&
++            a.bit < 5,
++          "배송 중에 준비 사항을 확인해 주세요.",
++        );
++        await run(
++          "UPDATE group_buys SET checklist=? WHERE id=?",
++          a.checked ? g.checklist | (1 << a.bit) : g.checklist & ~(1 << a.bit),
++          id,
++        );
++        break;
++      case "receive":
++        insist(
++          g.status === "ready" && p && !p.student_at,
++          "수령 가능한 참여 내역을 확인해 주세요.",
++        );
++        await run(
++          "UPDATE pickup_confirmations SET student_at=? WHERE pid=?",
++          clock(),
++          p.id,
++        );
++        await note(g.owner, id, "참여자가 수령을 확인했어요.");
++        await log(id, u.id, "참여자 수령 확인");
++        break;
++      case "handoff": {
++        manage();
++        const t = await one(
++          "SELECT c.* FROM pickup_confirmations c JOIN group_buy_participants p ON p.id=c.pid WHERE p.id=? AND buy=? AND active=1",
++          a.pid,
++          id,
++        );
++        insist(
++          g.status === "ready" && t?.student_at && !t.host_at,
++          "참여자의 수령 확인 후 전달을 확인해 주세요.",
++        );
++        await run(
++          "UPDATE pickup_confirmations SET host_at=?,host_uid=? WHERE pid=?",
++          clock(),
++          u.id,
++          a.pid,
++        );
++        await log(id, u.id, "개설자 전달 확인");
++        break;
++      }
++      case "chat":
++        insist(
++          (p || g.owner === u.id) &&
++            (!terminal || clock() - g.closed < 7 * day),
++          "대화에 메시지를 보낼 수 없어요.",
++        );
++        await run(
++          "INSERT INTO chat_messages(buy,uid,body,at) VALUES(?,?,?,?)",
++          id,
++          u.id,
++          z.string().trim().min(1).max(1000).parse(a.body),
++          clock(),
++        );
++        break;
++      case "issue": {
++        insist(p || g.owner === u.id, "공구 참여 후 문의할 수 있어요.");
++        const kind = z
++          .enum(["파손", "누락", "재수령 일정", "기타"])
++          .parse(a.kind);
++        if (kind === "재수령 일정")
++          insist(
++            g.status === "ready" && !p?.host_at,
++            "수령 단계에서 일정을 요청해 주세요.",
++          );
++        const photo = z
++          .string()
++          .max(700000)
++          .regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/)
++          .optional()
++          .parse(a.photo || undefined);
++        await run(
++          "INSERT INTO issue_reports(buy,uid,kind,body,photo,at) VALUES(?,?,?,?,?,?)",
++          id,
++          u.id,
++          kind,
++          z.string().trim().min(1).max(800).parse(a.body),
++          photo || null,
++          clock(),
++        );
++        await note(g.owner, id, kind + " 요청 접수");
++        await log(id, u.id, kind + " 접수");
++        break;
++      }
++      case "resolve": {
++        manage();
++        const r = await one(
++          "SELECT * FROM issue_reports WHERE id=? AND buy=? AND status='open'",
++          a.issue,
++          id,
++        );
++        insist(r, "처리할 문의가 없어요.");
++        const result = z.string().trim().min(1).max(800).parse(a.result);
++        if (a.dispute === true) {
++          insist(
++            u.role === "admin" && g.status === "ready",
++            "수령 단계의 분쟁은 운영자가 종결할 수 있어요.",
++          );
++          const affected = await member(id, r.uid);
++          insist(
++            affected && !affected.host_at,
++            "미수령 참여자를 확인해 주세요.",
++          );
++          await run(
++            "UPDATE group_buy_participants SET active=0 WHERE id=?",
++            affected.id,
++          );
++          await run(
++            "UPDATE payment_simulations SET status='void' WHERE pid=?",
++            affected.id,
++          );
++          await log(id, u.id, "미수령 분쟁 종결");
++          await note(r.uid, id, "분쟁 종결 · 모의 결제 취소");
++        }
++        await run(
++          "UPDATE issue_reports SET status='done',result=? WHERE id=?",
++          result,
++          r.id,
++        );
++        await note(r.uid, id, r.kind + " 처리 결과 · " + result);
++        await log(id, u.id, r.kind + " 처리 완료");
++        break;
++      }
++      case "schedule":
++        manage();
++        insist(!terminal, "종료된 공구예요.");
++        await run(
++          "UPDATE pickup_schedules SET at=?,place=? WHERE buy=?",
++          timestamp.min(clock()).parse(a.pickup),
++          z.string().trim().min(1).max(100).parse(a.place),
++          id,
++        );
++        await broadcast(id, "수령 일정 또는 장소가 변경됐어요.");
++        await log(id, u.id, "수령 안내 변경");
++        break;
++      default:
++        throw new Error("지원하지 않는 요청이에요.");
++    }
++    return { id };
++  });
++}
+diff --git a/supabase/migrations/20261124000100_moadam.sql b/supabase/migrations/20261124000100_moadam.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..3f45116b348e9158707059e35af6b9732454e5fd
+--- /dev/null
++++ b/supabase/migrations/20261124000100_moadam.sql
+@@ -0,0 +1,25 @@
++CREATE SCHEMA IF NOT EXISTS moadam;
++REVOKE ALL ON SCHEMA moadam FROM PUBLIC, anon, authenticated;
++SET LOCAL search_path = moadam, pg_catalog;
++CREATE TABLE IF NOT EXISTS spaces(id TEXT PRIMARY KEY);
++CREATE TABLE IF NOT EXISTS dormitories(id TEXT PRIMARY KEY,name TEXT NOT NULL);
++INSERT INTO dormitories VALUES ('A','A기숙사'),('B','B기숙사') ON CONFLICT DO NOTHING;
++CREATE TABLE IF NOT EXISTS profiles(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,space TEXT NOT NULL REFERENCES spaces,handle TEXT NOT NULL,name TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('student','admin')),notify INTEGER NOT NULL DEFAULT 1,UNIQUE(space,handle));
++CREATE TABLE IF NOT EXISTS dormitory_memberships(uid INTEGER PRIMARY KEY REFERENCES profiles,dorm TEXT NOT NULL REFERENCES dormitories);
++CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,uid INTEGER NOT NULL REFERENCES profiles,expires BIGINT NOT NULL);
++CREATE TABLE IF NOT EXISTS group_buys(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,owner INTEGER NOT NULL REFERENCES profiles,dorm TEXT NOT NULL REFERENCES dormitories,status TEXT NOT NULL CHECK(status IN ('open','full','pending','ordered','shipping','ready','done','failed','stopped')),mode TEXT NOT NULL CHECK(mode IN ('equal','units')),lots INTEGER NOT NULL CHECK(lots>0),deadline BIGINT NOT NULL,order_at BIGINT NOT NULL,created BIGINT NOT NULL,filled BIGINT,closed BIGINT,checklist INTEGER NOT NULL DEFAULT 0,kakao TEXT NOT NULL DEFAULT '');
++CREATE TABLE IF NOT EXISTS group_buy_items(buy INTEGER PRIMARY KEY REFERENCES group_buys,name TEXT NOT NULL,image TEXT NOT NULL,url TEXT NOT NULL,price INTEGER NOT NULL CHECK(price>0),qty INTEGER NOT NULL CHECK(qty>0),category TEXT NOT NULL);
++CREATE TABLE IF NOT EXISTS pickup_schedules(buy INTEGER PRIMARY KEY REFERENCES group_buys,place TEXT NOT NULL,at BIGINT NOT NULL);
++CREATE TABLE IF NOT EXISTS group_buy_participants(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,buy INTEGER NOT NULL REFERENCES group_buys,uid INTEGER NOT NULL REFERENCES profiles,lots INTEGER NOT NULL CHECK(lots>0),active INTEGER DEFAULT 1,amount INTEGER DEFAULT 0);
++CREATE UNIQUE INDEX IF NOT EXISTS unique_active ON group_buy_participants(buy,uid) WHERE active=1;
++CREATE TABLE IF NOT EXISTS payment_simulations(pid INTEGER PRIMARY KEY REFERENCES group_buy_participants,status TEXT NOT NULL CHECK(status IN ('demo','void')));
++CREATE TABLE IF NOT EXISTS orders(buy INTEGER PRIMARY KEY REFERENCES group_buys,recorded_by INTEGER REFERENCES profiles,at BIGINT NOT NULL);
++CREATE TABLE IF NOT EXISTS pickup_confirmations(pid INTEGER PRIMARY KEY REFERENCES group_buy_participants,student_at BIGINT,host_at BIGINT,host_uid INTEGER REFERENCES profiles);
++CREATE TABLE IF NOT EXISTS chat_rooms(buy INTEGER PRIMARY KEY REFERENCES group_buys);
++CREATE TABLE IF NOT EXISTS chat_messages(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,buy INTEGER NOT NULL REFERENCES chat_rooms,uid INTEGER NOT NULL REFERENCES profiles,body TEXT NOT NULL,at BIGINT NOT NULL);
++CREATE TABLE IF NOT EXISTS notifications(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,uid INTEGER NOT NULL REFERENCES profiles,buy INTEGER REFERENCES group_buys,body TEXT NOT NULL,at BIGINT NOT NULL,seen INTEGER DEFAULT 0,dedupe TEXT UNIQUE);
++CREATE TABLE IF NOT EXISTS cancellation_requests(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,pid INTEGER NOT NULL REFERENCES group_buy_participants,at BIGINT NOT NULL,result TEXT NOT NULL);
++CREATE TABLE IF NOT EXISTS issue_reports(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,buy INTEGER NOT NULL REFERENCES group_buys,uid INTEGER NOT NULL REFERENCES profiles,kind TEXT NOT NULL,body TEXT NOT NULL,photo TEXT,status TEXT NOT NULL DEFAULT 'open',result TEXT DEFAULT '',at BIGINT NOT NULL);
++CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,buy INTEGER REFERENCES group_buys,uid INTEGER REFERENCES profiles,event TEXT NOT NULL,at BIGINT NOT NULL);
++CREATE TABLE IF NOT EXISTS credentials(uid INTEGER PRIMARY KEY REFERENCES profiles, salt TEXT NOT NULL, digest TEXT NOT NULL);
++CREATE TABLE IF NOT EXISTS login_attempts(handle TEXT PRIMARY KEY,attempts INTEGER NOT NULL,until BIGINT NOT NULL);
+diff --git a/tests/accounts.test.ts b/tests/accounts.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..58972508c7c84b4af01e1dbe8339512f70faac75
+--- /dev/null
++++ b/tests/accounts.test.ts
+@@ -0,0 +1,49 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++process.env.DORM_DB = ":memory:";
++const { accountLogin, user, login, logout } = await import("../lib/db.ts");
++const { act, browse, detail } = await import("../lib/service.ts");
++test("독립 세션으로 가입한 공동 캠퍼스 계정은 같은 기숙사 공구만 공유한다", () => {
++  const reg = (handle: string, dorm: string) => ({
++    handle,
++    password: randomUUID(),
++    dorm,
++    notify: true,
++  });
++  const a = reg("shared-host", "A"),
++    b = reg("shared-student", "A"),
++    c = reg("other-student", "B");
++  const host = user(accountLogin(a, true)),
++    student = user(accountLogin(b, true)),
++    other = user(accountLogin(c, true));
++  const demo = user(login("", "operator", "A", true).session);
++  const t = Date.now() + 86400000;
++  const id = act(host, {
++    action: "create",
++    name: "휴지",
++    qty: 30,
++    lots: 2,
++    price: 7000,
++    url: "https://example.org/product",
++    image: "/art/tissue.webp",
++    category: "생활용품",
++    mode: "equal",
++    deadline: t,
++    orderAt: t,
++    pickup: t,
++    place: "로비",
++    agree: Array(5).fill(true),
++  }).id!;
++  assert.equal(browse(student).groups[0].id, id);
++  assert.throws(() => detail(other, id));
++  assert.throws(() => detail(demo, id));
++  act(student, { action: "join", id, lots: 1 });
++  assert.equal(detail(host, id).people, 1);
++  assert.equal(host.role, "student");
++  assert.throws(() => accountLogin({ ...a, password: randomUUID() }, false));
++  const s = accountLogin(a, false);
++  assert.equal(user(s).id, host.id);
++  logout(s);
++  assert.equal(user(s), undefined);
++});
+diff --git a/tests/pages-postgres.mjs b/tests/pages-postgres.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..fba69804942700375c07689baf7b56f44cc5f4d3
+--- /dev/null
++++ b/tests/pages-postgres.mjs
+@@ -0,0 +1,97 @@
++import assert from "node:assert/strict";
++const origin = "https://yang051228.github.io";
++async function api(path, data, session, spaceKey) {
++  const res = await fetch(
++    (process.env.MOADAM_TEST_API || "http://127.0.0.1:8000/moadam") +
++      "/" +
++      path,
++    {
++      method: data ? "POST" : "GET",
++      headers: {
++        origin,
++        "content-type": "application/json",
++        "x-moadam-session": session || "",
++        "x-moadam-space": spaceKey || "",
++      },
++      body: data ? JSON.stringify(data) : undefined,
++    },
++  );
++  const v = await res.json();
++  if (!res.ok) throw Error(path + " " + JSON.stringify(v));
++  return v;
++}
++const demo = await api("login", { account: "member", dorm: "A" }),
++  home = await api("home", null, demo.session);
++assert.equal(home.groups.length, 12);
++const deal = home.groups.find(
++  (g) => g.name.includes("화장지") && g.status === "open",
++);
++await api("act", { action: "join", id: deal.id, lots: 1 }, demo.session);
++assert.equal((await api("buy/" + deal.id, null, demo.session)).status, "full");
++await api("act", { action: "cancel", id: deal.id }, demo.session);
++assert.equal((await api("buy/" + deal.id, null, demo.session)).status, "open");
++const operator = await api(
++  "login",
++  { account: "operator", dorm: "A" },
++  demo.session,
++  demo.spaceKey,
++);
++assert.ok((await api("admin", null, operator.session)).rows.length);
++const pass = "test-password-12345",
++  prefix = "m" + Date.now();
++async function account(s, dorm = "A") {
++  return (
++    await api("signup", {
++      handle: prefix + s,
++      password: pass,
++      dorm,
++      notify: true,
++    })
++  ).session;
++}
++const host = await account("host"),
++  one = await account("one"),
++  two = await account("two"),
++  other = await account("other", "B");
++const now = Date.now();
++const { id } = await api(
++  "act",
++  {
++    action: "create",
++    name: "시험 공구",
++    image: "/art/tissue.webp",
++    url: "https://example.org",
++    price: 3150,
++    qty: 5,
++    lots: 1,
++    mode: "equal",
++    deadline: now + 600000,
++    orderAt: now + 900000,
++    pickup: now + 1000000,
++    place: "로비",
++    category: "생활용품",
++    agree: [true, true, true, true, true],
++  },
++  host,
++);
++assert.equal((await api("home", null, other)).groups.length, 0);
++await assert.rejects(api("buy/" + id, null, other));
++const race = await Promise.allSettled(
++  [one, two].map((s) => api("act", { action: "join", id, lots: 1 }, s)),
++);
++assert.equal(race.filter((x) => x.status === "fulfilled").length, 1);
++const winner = race[0].status === "fulfilled" ? one : two;
++for (const to of ["pending", "ordered", "shipping"])
++  await api("act", { action: "advance", id, to }, host);
++for (let bit = 0; bit < 5; bit++)
++  await api("act", { action: "check", id, bit, checked: true }, host);
++await api("act", { action: "advance", id, to: "ready" }, host);
++await api("act", { action: "receive", id }, winner);
++const g = await api("buy/" + id, null, host);
++await api("act", { action: "handoff", id, pid: g.members[0].id }, host);
++await api("act", { action: "advance", id, to: "done" }, host);
++const fresh = await api("signin", { handle: prefix + "host", password: pass });
++assert.equal((await api("buy/" + id, null, fresh.session)).status, "done");
++console.log(
++  "PASS demo, admin, two accounts, dorm isolation, race, order, pickup, sign-in",
++);
+diff --git a/tests/race.test.ts b/tests/race.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..79374d087a7c4151538d330cbe46018fae664b42
+--- /dev/null
++++ b/tests/race.test.ts
+@@ -0,0 +1,42 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { spawn } from "node:child_process";
++test("독립 SQLite 연결 두 개가 마지막 단위에 동시에 신청하면 한 건만 확정", async () => {
++  const dir = mkdtempSync(join(tmpdir(), "dorm-race-"));
++  process.env.DORM_DB = join(dir, "race.sqlite");
++  const { login, user, db } = await import("../lib/db.ts");
++  const { browse, detail } = await import("../lib/service.ts");
++  try {
++    const { session, spaceKey } = login("", "member", "A", true),
++      host = login(spaceKey, "host", "A", true);
++    const student = user(session),
++      g = browse(student).groups.find(
++        (g) => g.name.includes("화장지") && g.status === "open",
++      );
++    const until = Date.now() + 1000;
++    const attempt = (key: string) =>
++      new Promise<number>((ok, fail) => {
++        const code = `import {user} from './lib/db.ts';import {act} from './lib/service.ts';const [s,id,t]=process.argv.slice(1);await new Promise(r=>setTimeout(r,Math.max(0,Number(t)-Date.now())));try{act(user(s),{action:'join',id:Number(id),lots:1})}catch(e){process.exitCode=2}`;
++        const child = spawn(
++          process.execPath,
++          ["--input-type=module", "-e", code, key, String(g.id), String(until)],
++          { stdio: "ignore" },
++        );
++        child.on("error", fail);
++        child.on("exit", (c) => ok(c ?? 99));
++      });
++    assert.deepEqual(
++      (await Promise.all([attempt(session), attempt(host.session)])).sort(),
++      [0, 2],
++    );
++    const result = detail(student, g.id);
++    assert.equal(result.used, result.lots);
++    assert.equal(result.status, "full");
++  } finally {
++    db.close();
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
+diff --git a/tests/workflow.test.ts b/tests/workflow.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b1be705645d93694a64be871172d3306eeb4248
+--- /dev/null
++++ b/tests/workflow.test.ts
+@@ -0,0 +1,214 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++process.env.DORM_DB = ":memory:";
++const { login, user, one, run, db, tx, sweep } = await import("../lib/db.ts");
++const { act, detail, browse, admin } = await import("../lib/service.ts");
++const { day } = await import("../lib/catalog.ts");
++function setup() {
++  const a = login("", "member", "A", true);
++  const account = (role: string, d = "A") =>
++    user(login(a.spaceKey, role, d, true).session);
++  return {
++    student: user(a.session),
++    host: account("host"),
++    op: account("operator"),
++    b: account("member", "B"),
++  };
++}
++function create(u: any, n = 2, mode = "units") {
++  const t = Date.now();
++  return act(u, {
++    action: "create",
++    name: "테스트 물품",
++    image: "/art/wipes.webp",
++    url: "https://example.org/product",
++    price: 10001,
++    qty: 6,
++    lots: n,
++    mode,
++    category: "생활용품",
++    deadline: t + day,
++    orderAt: t + 2 * day,
++    pickup: t + 3 * day,
++    place: "1층",
++    agree: Array(5).fill(true),
++  }).id!;
++}
++const step = (u: any, id: number, to: string) =>
++  act(u, { action: "advance", id, to });
++function ready(host: any, id: number) {
++  for (const s of ["pending", "ordered", "shipping"]) step(host, id, s);
++  assert.throws(() => step(host, id, "ready"));
++  for (let bit = 0; bit < 5; bit++)
++    act(host, { action: "check", id, bit, checked: true });
++  step(host, id, "ready");
++}
++test("1. 운영자 휴지 공구 마지막 자리 참여 → 주문 → 양측 수령 → 종료", () => {
++  const { student, op } = setup();
++  const g = browse(student).groups.find(
++    (g) => g.status === "open" && g.name.includes("화장지"),
++  );
++  assert.equal(g.lots - g.used, 1);
++  act(student, { action: "join", id: g.id, lots: 1 });
++  assert.equal(detail(student, g.id).mine.amount, 3150);
++  assert.equal(detail(op, g.id).status, "full");
++  ready(op, g.id);
++  for (const p of detail(op, g.id).members) {
++    const u = { ...student, id: p.uid };
++    act(u, { action: "receive", id: g.id });
++    act(op, { action: "handoff", id: g.id, pid: p.id });
++  }
++  step(op, g.id, "done");
++  assert.equal(detail(student, g.id).status, "done");
++});
++test("2. 학생 개설 · 지정 수량 · 원 단위 잔액 · 분배 준비 · 종료", () => {
++  const { student, host, op } = setup(),
++    id = create(host);
++  act(student, { action: "join", id, lots: 1 });
++  act(op, { action: "join", id, lots: 1 });
++  const g = detail(host, id);
++  assert.equal(
++    g.members.reduce((a: number, m: any) => a + m.amount, 0),
++    10001,
++  );
++  ready(host, id);
++  for (const u of [student, op]) {
++    act(u, { action: "receive", id });
++    act(host, { action: "handoff", id, pid: detail(u, id).mine.id });
++  }
++  step(host, id, "done");
++  assert.equal(detail(host, id).status, "done");
++});
++test("3. 마감 미달 · 알림 · 모의 결제 취소 · 재개설", () => {
++  const { host, student } = setup(),
++    id = create(host);
++  act(student, { action: "join", id, lots: 1 });
++  run("UPDATE group_buys SET deadline=0 WHERE id=?", id);
++  let g = detail(host, id);
++  assert.equal(g.status, "failed");
++  assert.equal(g.members[0].payment, "void");
++  assert.throws(() => act(host, { action: "join", id, lots: 1 }));
++  assert.ok(browse(student).notifications.some((n) => n.body === "모집 실패"));
++  assert.notEqual(create(host), id);
++});
++test("4. 마감 전 취소·재참여 및 주문 후 요청 검토", () => {
++  const { host, student, op } = setup(),
++    id = create(host);
++  act(student, { action: "join", id, lots: 2 });
++  act(student, { action: "cancel", id });
++  assert.equal(detail(host, id).used, 0);
++  act(student, { action: "join", id, lots: 2 });
++  step(host, id, "pending");
++  step(host, id, "ordered");
++  act(student, { action: "cancel", id });
++  assert.equal(detail(host, id).used, 2);
++  const r = detail(op, id).requests.at(-1);
++  act(op, { action: "resolveCancel", id, request: r.id, result: "승인" });
++  assert.equal(detail(host, id).used, 0);
++  assert.equal(detail(op, id).requests.at(-1).result, "승인");
++});
++test("5. 미수령 알림 → 재수령 일정 접수 → 처리 → 전달 확인", () => {
++  const { host, student, op } = setup(),
++    id = create(host);
++  for (const u of [student, op]) act(u, { action: "join", id, lots: 1 });
++  ready(host, id);
++  act(op, { action: "receive", id });
++  act(host, { action: "handoff", id, pid: detail(op, id).mine.id });
++  assert.throws(() => step(host, id, "done"));
++  run("UPDATE pickup_schedules SET at=0 WHERE buy=?", id);
++  const n = browse(student).notifications;
++  assert.ok(n.some((n) => n.body.includes("재수령")));
++  act(student, {
++    action: "issue",
++    id,
++    kind: "재수령 일정",
++    body: "내일 14시 희망",
++  });
++  const issue = detail(host, id).issues[0];
++  act(host, {
++    action: "resolve",
++    id,
++    issue: issue.id,
++    result: "내일 14시 로비에서 전달",
++  });
++  act(student, { action: "receive", id });
++  act(host, { action: "handoff", id, pid: detail(student, id).mine.id });
++  step(host, id, "done");
++});
++test("권한 · 공간 격리 · 중복 참여 · 수량 초과 · 채팅 권한 · 순서 역행 차단", () => {
++  const { host, student, op, b } = setup(),
++    id = create(host);
++  const other = setup();
++  assert.throws(() => detail(b, id));
++  assert.throws(() => detail(other.student, id));
++  assert.throws(() => admin(student));
++  assert.throws(() => act(student, { action: "advance", id, to: "failed" }));
++  assert.throws(() => act(host, { action: "advance", id, to: "ordered" }));
++  assert.throws(() => act(student, { action: "join", id, lots: 3 }));
++  assert.throws(() => act(op, { action: "chat", id, body: "열람" }));
++  act(student, { action: "join", id, lots: 1 });
++  assert.throws(() => act(student, { action: "join", id, lots: 1 }));
++  act(student, { action: "chat", id, body: "안녕하세요" });
++  assert.equal(detail(host, id).messages.length, 1);
++  assert.equal(detail(op, id).messages.length, 0);
++  assert.throws(() => act(op, { action: "join", id, lots: 2 }));
++  assert.equal(detail(host, id).used, 1);
++  assert.throws(() => login("", "root", "A", true));
++});
++test("주문 지연 · 알림 중복 방지 · 운영자 중단", () => {
++  const { host, student, op } = setup(),
++    id = create(host);
++  act(student, { action: "join", id, lots: 2 });
++  run("UPDATE group_buys SET order_at=? WHERE id=?", Date.now() - 2 * day, id);
++  tx(sweep);
++  tx(sweep);
++  assert.equal(
++    browse(op).notifications.filter(
++      (n) => n.buy === id && n.body.includes("지연"),
++    ).length,
++    1,
++  );
++  act(op, { action: "stop", id });
++  assert.equal(detail(host, id).members[0].payment, "void");
++});
++test("균등 분배 검증·사진 신고·운영자 통계", () => {
++  const { host, student, op } = setup();
++  assert.throws(() => create(host, 4));
++  const id = create(host, 2, "equal");
++  assert.throws(() => act(student, { action: "join", id, lots: 2 }));
++  act(student, { action: "join", id, lots: 1 });
++  act(student, {
++    action: "issue",
++    id,
++    kind: "파손",
++    body: "포장 파손",
++    photo: "data:image/png;base64,AA==",
++  });
++  assert.ok(detail(host, id).issues[0].photo);
++  assert.ok(admin(op).entries.some((r) => r.buy === id));
++});
++test("미수령 분쟁은 운영자가 사유와 처리 결과를 기록한 뒤 종결한다", () => {
++  const { host, student, op } = setup(),
++    id = create(host);
++  act(student, { action: "join", id, lots: 2 });
++  ready(host, id);
++  act(student, {
++    action: "issue",
++    id,
++    kind: "누락",
++    body: "수령할 물품이 없음",
++  });
++  const issue = detail(op, id).issues[0].id;
++  assert.throws(() =>
++    act(host, { action: "resolve", id, issue, result: "합의", dispute: true }),
++  );
++  act(op, {
++    action: "resolve",
++    id,
++    issue,
++    result: "수량 누락 확인, 해당 분담금 모의 취소에 합의",
++    dispute: true,
++  });
++  step(host, id, "done");
++  assert.equal(detail(op, id).issues[0].status, "done");
++});
+diff --git a/tsconfig.json b/tsconfig.json
+index d25eeeb2527f69f01b1090eeae8002a99fd42eaf..06affae6355d83005291fd627c7d1961bef2ce67 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -1,7 +1,11 @@
+ {
+   "compilerOptions": {
+     "target": "ES2022",
+-    "lib": ["DOM", "DOM.Iterable", "ES2022"],
++    "lib": [
++      "DOM",
++      "DOM.Iterable",
++      "ES2022"
++    ],
+     "strict": true,
+     "noEmit": true,
+     "module": "ESNext",
+@@ -12,10 +16,18 @@
+     "jsx": "react-jsx",
+     "esModuleInterop": true,
+     "isolatedModules": true,
+-    "plugins": [{ "name": "next" }],
++    "plugins": [
++      {
++        "name": "next"
++      }
++    ],
+     "allowJs": true,
+     "incremental": true,
+-    "paths": { "@/*": ["./*"] }
++    "paths": {
++      "@/*": [
++        "./*"
++      ]
++    }
+   },
+   "include": [
+     "next-env.d.ts",
+@@ -24,5 +36,9 @@
+     ".next/types/**/*.ts",
+     ".next/dev/types/**/*.ts"
+   ],
+-  "exclude": ["node_modules"]
++  "exclude": [
++    "node_modules",
++    "supabase",
++    "pages-site"
++  ]
+ }

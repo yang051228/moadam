@@ -46,7 +46,7 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           supabase link --project-ref "$PROJECT_REF"
-          supabase db push
+          supabase db push --remote --yes
           supabase functions deploy moadam --project-ref "$PROJECT_REF"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

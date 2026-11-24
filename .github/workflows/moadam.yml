@@ -47,7 +47,7 @@ jobs:
         run: |
           supabase link --project-ref "$PROJECT_REF"
           supabase db push --remote --yes
-          supabase functions deploy moadam --project-ref "$PROJECT_REF"
+          supabase functions deploy moadam --remote="$PROJECT_REF" --yes
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

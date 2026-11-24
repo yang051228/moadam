@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>모아담 | 기숙사 공동구매</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f7f3; color: #24352c; font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 540px; margin: auto; padding: 32px 20px; }
+    header { margin-bottom: 28px; }
+    h1 { margin: 0; color: #236448; }
+    h2 { font-size: 21px; margin: 0 0 8px; }
+    p { margin: 6px 0; }
+    article { background: white; border: 1px solid #dce4dc; border-radius: 18px; padding: 22px; margin-bottom: 16px; }
+    button { width: 100%; padding: 13px; margin-top: 12px; border: 0; border-radius: 10px; background: #236448; color: white; font: inherit; font-weight: 700; cursor: pointer; }
+    button.cancel { background: #e9efeb; color: #294939; }
+    small { color: #516458; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>모아담</h1>
+      <p>기숙사 친구들과 필요한 만큼 나눠 사요.</p>
+      <small>체험용 공구예요. 신청은 이 브라우저에만 저장돼요.</small>
+    </header>
+    <section id="deals" aria-label="공동구매 목록"></section>
+    <p id="notice" role="status"></p>
+  </main>
+
+  <script>
+    const deals = [
+      { id: "tissue", name: "도톰한 3겹 데일리 화장지", share: "5롤", price: "3,150원", joined: 5, total: 6 },
+      { id: "wipes", name: "기숙사 생활 물티슈", share: "2팩", price: "2,400원", joined: 2, total: 5 }
+    ];
+
+    const list = document.querySelector("#deals");
+    const notice = document.querySelector("#notice");
+
+    for (const deal of deals) {
+      const key = "moadam-demo-" + deal.id;
+      const card = document.createElement("article");
+      card.innerHTML = `
+        <h2>${deal.name}</h2>
+        <p>내가 받을 수량 <strong>${deal.share}</strong> · 부담금 <strong>${deal.price}</strong></p>
+        <p>수령 장소 · 기숙사 1층 로비</p>
+        <p class="count"></p>
+        <button type="button"></button>
+      `;
+      const button = card.querySelector("button");
+
+      function render() {
+        const mine = localStorage.getItem(key) === "yes";
+        const count = deal.joined + Number(mine);
+        card.querySelector(".count").textContent =
+          `${count}/${deal.total}명 참여 · ${count === deal.total ? "모집 완료" : "모집 중"}`;
+        button.textContent = mine ? "내 신청 취소하기" : `${deal.share} 참여하기`;
+        button.classList.toggle("cancel", mine);
+      }
+
+      button.onclick = () => {
+        if (localStorage.getItem(key) === "yes") {
+          localStorage.removeItem(key);
+          notice.textContent = `${deal.name} 신청을 취소했어요.`;
+        } else {
+          localStorage.setItem(key, "yes");
+          notice.textContent = `${deal.name} 체험 신청이 완료됐어요.`;
+        }
+        render();
+      };
+
+      list.append(card);
+      render();
+    }
+  </script>
+</body>
+</html>
